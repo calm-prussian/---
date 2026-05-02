@@ -1,0 +1,4 @@
+# 酒馆的路径，是文件夹
+酒馆路径: /Users/dinghui/酒馆/SillyTavern
+# 酒馆存放插件的路径，是文件夹，里面的插件是以文件夹的形式存在的，每个插件一个文件夹
+插件路径: /Users/dinghui/酒馆/SillyTavern/public/scripts/extensions/third-party

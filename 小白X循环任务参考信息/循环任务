@@ -1,0 +1,462 @@
+import { Callout, Cards } from 'nextra/components'
+
+# 循环任务
+
+循环任务是小白X的自动化脚本系统，可根据对话频率或特定时机自动执行斜杠命令或 JavaScript 脚本。适合制作自动好感度系统、环境变化检测、定时清理上下文等功能。
+
+## 启用功能
+
+在酒馆中打开 **扩展设置** → **小白X扩展** → **循环任务** → 勾选 `启用循环任务`。
+
+---
+
+## 基础概念
+
+### 作用域
+
+| 类型 | 说明 | 存储位置 |
+|:-----|:-----|:---------|
+| **全局任务** | 对所有角色生效 | 插件设置 |
+| **角色任务** | 仅对当前角色生效 | 角色卡文件 |
+| **预设任务** | 绑定到 API 预设 | OpenAI 预设 |
+
+### 触发时机
+
+| 时机 | 说明 |
+|:-----|:-----|
+| **AI 后** (after_ai) | AI 回复渲染完成后触发 |
+| **用户前** (before_user) | 用户点击发送，消息尚未传给 AI 前触发 |
+| **角色初始化** (character_init) | 开始新聊天或切换角色时触发 |
+| **切换聊天后** (chat_changed) | 切换到不同历史记录时触发 |
+| **插件初始化** (plugin_init) | 网页刷新、插件加载完成时触发 |
+| **手动触发** | 间隔设为 0，仅通过按钮或命令触发 |
+
+### 楼层间隔
+
+- **1~999**：每隔 N 个楼层执行一次（如设置 3，则在第 3、6、9... 楼层执行）
+- **0**：不自动触发，仅手动执行
+
+### 楼层类型
+
+| 类型 | 计算方式 |
+|:-----|:---------|
+| **全部楼层** | 用户 + AI 消息总数 |
+| **用户楼层** | 仅计算用户消息 |
+| **LLM 楼层** | 仅计算 AI 回复 |
+
+### 任务栏按钮
+
+勾选任务编辑界面的 **"激活任务栏按钮"**，该任务会出现在输入框上方，点击即可执行。
+
+---
+
+## 斜杠命令
+
+| 命令 | 用法 | 说明 |
+|:-----|:-----|:-----|
+| `/xbqte` | `/xbqte 任务名称` | 立即执行指定任务 |
+| `/xbset` | `/xbset status=on/off 任务名` | 启用或禁用任务 |
+| `/xbset` | `/xbset interval=数字 任务名` | 修改触发间隔 |
+| `/xbset` | `/xbset timing=after_ai 任务名` | 修改触发时机 |
+
+**示例：**
+```bash
+/xbqte 状态检查          # 立即运行"状态检查"任务
+/xbset status=off 状态检查  # 关闭自动执行
+```
+
+---
+
+## 基础任务：斜杠命令
+
+最简单的任务就是执行一串斜杠命令：
+
+```stscript
+/input 请输入你的名字 |
+/setvar key=playerName {{pipe}} |
+/echo 你好，{{getvar::playerName}}！
+```
+
+可组合使用 [STscript官方文档](https://docs.sillytavern.app/usage/st-script/) 中的任意命令。
+
+---
+
+## 进阶任务：TaskJS 脚本
+
+TaskJS 允许在任务中嵌入原生 JavaScript，获得完整的编程能力。
+
+<Cards>
+  <Cards.Card
+    title="下载SillyTavern JavaScript API 参考文档"
+    href="/assets/SillyTavern JavaScript API 参考文档.md"
+    target="_blank"
+    download
+  />
+</Cards>
+
+<Callout type="error">
+  TaskJS 拥有完整的系统权限，可能对酒馆造成不可逆损伤。请确保代码来源可信。
+</Callout>
+
+### 基本语法
+
+```javascript
+<<taskjs>>
+// 你的代码
+console.log('Hello from TaskJS!');
+
+// 必须 return 才能传递返回值
+return { success: true, message: '执行完成' };
+<</taskjs>>
+```
+
+<Callout type="info">
+  **重要**：如果需要获取返回值，必须在代码末尾使用 `return`。
+</Callout>
+
+### 异步代码
+
+```javascript
+<<taskjs>>
+(async () => {
+    await STscript('/echo 开始执行...');
+
+    // 异步操作
+    const result = await fetch('https://api.example.com/data');
+    const data = await result.json();
+
+    await STscript(`/echo 获取到 ${data.length} 条数据`);
+
+    return data;  // 返回结果
+})();
+<</taskjs>>
+```
+
+---
+
+## 内置对象
+
+### STscript(command)
+
+在脚本中执行斜杠命令，最常用的函数。
+
+```javascript
+<<taskjs>>
+// 基础用法
+await STscript('/echo 你好，世界！');
+
+// 获取命令返回值
+const lastMsg = await STscript('/messages {{lastMessageId}}');
+console.log('最后一条消息:', lastMsg);
+
+// 链式命令
+await STscript('/setvar key=score 100 | /echo 分数已设置');
+<</taskjs>>
+```
+
+### addFloorListener(callback, options)
+
+注册动态楼层监听器，用于持续监听后续对话。
+
+```javascript
+<<taskjs>>
+let count = 0;
+
+// 防止脚本被回收
+const keepAlive = setInterval(() => {}, 60000);
+
+const removeListener = addFloorListener((data) => {
+    count++;
+    STscript(`/echo 第 ${count} 次 AI 回复`);
+
+    if (count >= 5) {
+        clearInterval(keepAlive);
+        removeListener();  // 注销监听
+    }
+}, {
+    interval: 1,        // 每1楼触发
+    timing: 'after_ai', // AI回复后
+    floorType: 'llm'    // 只计算AI消息
+});
+<</taskjs>>
+```
+
+### abortSignal
+
+中断信号，用于监控任务是否被取消。
+
+```javascript
+<<taskjs>>
+// 网络请求可被中断
+const response = await fetch('https://api.example.com/data', {
+    signal: abortSignal
+});
+
+// 监听中断事件
+abortSignal.addEventListener('abort', () => {
+    console.log('任务被取消，正在清理...');
+});
+<</taskjs>>
+```
+
+### window.XBTasks
+
+全局任务管理 API。
+
+```javascript
+// 列出所有任务
+XBTasks.list('global');  // 全局任务
+XBTasks.list('character');  // 角色任务
+XBTasks.list('all');  // 所有任务
+
+// 查找任务
+const task = XBTasks.find('任务名');
+
+// 修改任务属性
+await XBTasks.setProps('任务名', {
+    disabled: false,
+    interval: 5,
+    triggerTiming: 'after_ai'
+});
+
+// 修改任务命令
+await XBTasks.setCommands('任务名', '/echo 新命令', { mode: 'replace' });
+
+// 执行任务
+await XBTasks.exec('任务名');
+
+// 获取完整任务数据（含脚本内容）
+const fullData = await XBTasks.dump('global');
+```
+
+---
+
+## 动态导入酒馆模块
+
+TaskJS 运行在酒馆扩展环境中，可以直接导入酒馆的内部模块。
+
+### 常用模块
+
+```javascript
+<<taskjs>>
+(async () => {
+    // 主模块 - 聊天、角色、设置
+    const { chat, characters, this_chid, saveSettingsDebounced } =
+        await import('/script.js');
+
+    // OpenAI 模块
+    const { oai_settings } = await import('/scripts/openai.js');
+
+    // 世界书模块
+    const { world_info, world_names } = await import('/scripts/world-info.js');
+
+    // 斜杠命令解析器
+    const { SlashCommandParser } =
+        await import('/scripts/slash-commands/SlashCommandParser.js');
+
+    console.log('当前角色:', characters[this_chid]?.name);
+    console.log('聊天消息数:', chat.length);
+    console.log('世界书列表:', world_names);
+})();
+<</taskjs>>
+```
+
+### 通过 window 获取
+
+```javascript
+<<taskjs>>
+const ctx = window.SillyTavern?.getContext?.();
+console.log('聊天:', ctx.chat);
+console.log('角色:', ctx.characters);
+<</taskjs>>
+```
+
+---
+
+## 与 iframe 联动
+
+**让 iframe 中的 HTML 页面获取酒馆的完整数据**。
+
+### 原理
+
+```
+iframe (HTML页面)
+    ↓ await STscript('/xbqte 任务名')
+循环任务 (TaskJS)
+    ↓ 完整的酒馆API权限
+    ↓ return 数据
+iframe 拿到返回值
+```
+
+### 示例：获取世界书数据
+
+**步骤1：创建循环任务 "获取世界书"**
+
+```javascript
+<<taskjs>>
+const { world_info, world_names } = await import('/scripts/world-info.js');
+
+return {
+    names: world_names,
+    entries: world_info
+};
+<</taskjs>>
+```
+
+**步骤2：在 iframe HTML 中调用**
+
+```html
+<script>
+async function loadWorldInfo() {
+    const data = await STscript('/xbqte 获取世界书');
+
+    console.log('世界书列表:', data.names);
+
+    // 遍历所有条目
+    for (const [bookName, entries] of Object.entries(data.entries)) {
+        console.log(`${bookName}: ${entries.length} 条`);
+    }
+}
+
+loadWorldInfo();
+</script>
+```
+
+### 更多数据获取任务
+
+**获取完整聊天数据：**
+
+```javascript
+<<taskjs>>
+const ctx = SillyTavern.getContext();
+return {
+    chat: ctx.chat,
+    chatId: ctx.chatId,
+    messageCount: ctx.chat.length
+};
+<</taskjs>>
+```
+
+**获取当前角色信息：**
+
+```javascript
+<<taskjs>>
+const { characters, this_chid } = await import('/script.js');
+return characters[this_chid];
+<</taskjs>>
+```
+
+**搜索世界书：**
+
+```javascript
+<<taskjs>>
+// 任务名：搜索世界书
+// 调用：/xbqte 搜索世界书 | /setvar key=keyword 龙族
+
+const keyword = await STscript('/getvar keyword');
+const { world_info } = await import('/scripts/world-info.js');
+
+const results = [];
+for (const entries of Object.values(world_info)) {
+    for (const entry of entries) {
+        if (entry.key?.some(k => k.includes(keyword)) ||
+            entry.content?.includes(keyword)) {
+            results.push(entry);
+        }
+    }
+}
+return results;
+<</taskjs>>
+```
+
+---
+
+## 实战示例
+
+### 实时时钟（DOM操作）
+
+```javascript
+<<taskjs>>
+function updateClock() {
+    const el = document.getElementById('xiaobaix-clock');
+    if (el) el.textContent = new Date().toLocaleTimeString('zh-CN');
+}
+
+// 创建时钟元素
+const clock = document.createElement('div');
+clock.id = 'xiaobaix-clock';
+clock.style.cssText = 'position:fixed;top:10px;right:10px;background:#333;color:#fff;padding:8px 12px;border-radius:4px;z-index:9999;';
+document.body.appendChild(clock);
+
+setInterval(updateClock, 1000);
+updateClock();
+<</taskjs>>
+```
+
+### 注册临时斜杠命令
+
+```javascript
+<<taskjs>>
+(async () => {
+    const { SlashCommandParser } = await import('/scripts/slash-commands/SlashCommandParser.js');
+    const { SlashCommand } = await import('/scripts/slash-commands/SlashCommand.js');
+
+    SlashCommandParser.addCommandObject(SlashCommand.fromProps({
+        name: 'hello',
+        callback: async () => {
+            toastr?.info?.('Hello from custom command!');
+            return 'Hello!';
+        },
+        helpString: '自定义问候命令'
+    }));
+
+    console.log('命令 /hello 已注册');
+})();
+<</taskjs>>
+```
+
+### 切换 OpenAI 预设
+
+```javascript
+<<taskjs>>
+(async () => {
+    const targetPreset = 'Default';
+
+    const { oai_settings, openai_setting_names, openai_settings } =
+        await import('/scripts/openai.js');
+    const { saveSettingsDebounced } = await import('/script.js');
+
+    const presetName = Object.keys(openai_setting_names)
+        .find(n => n.toLowerCase() === targetPreset.toLowerCase());
+
+    if (presetName) {
+        oai_settings.preset_settings_openai = presetName;
+        await saveSettingsDebounced?.();
+        toastr?.success?.(`已切换到预设：${presetName}`);
+    }
+})();
+<</taskjs>>
+```
+
+---
+
+## 注意事项
+
+<Callout type="warning">
+**关键点：**
+
+1. **异步操作**：`import()` 和 `STscript()` 必须配合 `await` 使用
+2. **返回值**：必须显式 `return` 才能获取返回值，否则为 `undefined`
+3. **绝对路径**：模块导入使用 `/scripts/` 开头的绝对路径
+4. **一次性执行**：TaskJS 触发后即结束，长期监听需用 `addFloorListener`
+5. **容错处理**：推荐使用 `toastr?.success?.()` 等可选链语法
+</Callout>
+
+### 常见问题
+
+| 问题 | 原因 | 解决方案 |
+|:-----|:-----|:---------|
+| 返回值是 undefined | 没写 return | 在代码末尾加 `return 数据` |
+| 模块导入失败 | 路径错误 | 使用 `/scripts/xxx.js` 绝对路径 |
+| 任务不触发 | 间隔或时机设置问题 | 检查楼层间隔和触发时机配置 |
+| 同名任务冲突 | 并发调用同名任务 | 避免同时多次调用同一任务 |
