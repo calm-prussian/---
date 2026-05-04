@@ -1,5 +1,6 @@
 <<taskjs>>
 (async () => {
+    const prevState = window._atts_state || null;
     if (window._cleanup) {
         window._cleanup();
         delete window._cleanup;
@@ -10,12 +11,13 @@
     const { chat, Generate } = await import('/script.js');
 
     let s = false;
-    let lastTriggered = null;
-    let loopCount = 0;
-    let retryCount = 0;
-    let stopped = true;
+    let lastTriggered = prevState?.lastTriggered ?? null;
+    let loopCount = prevState?.loopCount ?? 0;
+    let retryCount = prevState?.retryCount ?? 0;
+    let stopped = prevState?.stopped ?? true;
     let retryTimer = null;
     const keepAlive = setInterval(() => {}, 60000);
+    delete window._atts_state;
 
     let cfg = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3 };
 
@@ -30,6 +32,10 @@
         localStorage.setItem('auto_tts_cfg', JSON.stringify(cfg));
     }
 
+    function saveState() {
+        window._atts_state = { lastTriggered, loopCount, retryCount, stopped };
+    }
+
     function esc(str) {
         const d = document.createElement('div');
         d.textContent = str;
@@ -41,11 +47,13 @@
         if (cfg.maxLoop > 0 && loopCount >= cfg.maxLoop) {
             console.log(`[AutoTTS] 达到最大循环次数(${cfg.maxLoop})，停止发送`);
             stopped = true;
+            saveState();
             showToast(`已达最大循环次数(${cfg.maxLoop})`);
             return;
         }
         s = true;
         loopCount++;
+        saveState();
         console.log(`[AutoTTS] 第${loopCount}次发送: ${cfg.text.substring(0, 20)}`);
         const t = document.getElementById('send_textarea');
         const b = document.getElementById('send_but');
@@ -85,6 +93,7 @@
                 if (state === 'playing' && !s && lastTriggered !== item?.messageId) {
                     console.log('[AutoTTS] 触发发送, msgId:', item?.messageId);
                     lastTriggered = item?.messageId;
+                    saveState();
                     send();
                 }
             } catch (e) {
@@ -110,6 +119,8 @@
                 if (cfg.mustContain && msg && !String(msg.mes || '').includes(cfg.mustContain)) {
                     if (retryCount < cfg.maxRetries) {
                         retryCount++;
+                        lastTriggered = null;
+                        saveState();
                         console.log(`[AutoTTS] 不含"${cfg.mustContain}"，重试 ${retryCount}/${cfg.maxRetries}`);
                         showToast(`关键字检查未通过，正在重试(${retryCount}/${cfg.maxRetries})`);
                         clearTimeout(retryTimer);
@@ -236,6 +247,7 @@
             root.style.display = 'none';
             stopped = false;
             lastTriggered = null;
+            saveState();
             send();
         };
         document.getElementById('atts_stop').onclick = () => {
@@ -245,6 +257,7 @@
             loopCount = 0;
             retryCount = 0;
             clearTimeout(retryTimer);
+            saveState();
             root.style.display = 'none';
             showToast('循环已停止');
         };
@@ -258,10 +271,16 @@
         document.getElementById('atts_panel').style.display = 'flex';
     }
 
-    // ============ 启动：打开设置面板 ============
-    openPanel();
+    // ============ 启动 ============
+    if (stopped) {
+        console.log('[AutoTTS] 首次启动或已停止，打开设置面板');
+        openPanel();
+    } else {
+        console.log(`[AutoTTS] 恢复运行状态(第${loopCount}轮, 重试${retryCount}次)`);
+    }
 
     const cleanup = () => {
+        saveState();
         window._running = false;
         delete window._cleanup;
         clearInterval(keepAlive);
