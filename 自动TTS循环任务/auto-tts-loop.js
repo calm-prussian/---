@@ -8,9 +8,10 @@
     }
     window._running = true;
 
-    const { chat, Generate } = await import('/script.js');
+    const { chat, Generate, eventSource, event_types } = await import('/script.js');
 
     let s = false;
+    let isGenerating = false;
     let lastTriggered = prevState?.lastTriggered ?? null;
     let loopCount = prevState?.loopCount ?? 0;
     let retryCount = prevState?.retryCount ?? 0;
@@ -18,6 +19,13 @@
     let retryTimer = null;
     const keepAlive = setInterval(() => {}, 60000);
     delete window._atts_state;
+
+    const onGenStart = () => { isGenerating = true; console.log('[AutoTTS] 生成开始'); };
+    const onGenEnd = () => { isGenerating = false; console.log('[AutoTTS] 生成结束'); };
+    const onGenStop = () => { isGenerating = false; console.log('[AutoTTS] 生成中断'); };
+    eventSource.on(event_types.GENERATION_STARTED, onGenStart);
+    eventSource.on(event_types.GENERATION_ENDED, onGenEnd);
+    eventSource.on(event_types.GENERATION_STOPPED, onGenStop);
 
     let cfg = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3, findBtnRetries: 10, skipOnBtnFail: true };
     const CFG_DEFAULTS = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3, findBtnRetries: 10, skipOnBtnFail: true };
@@ -188,11 +196,31 @@
                         showToast(`关键字检查未通过，正在重试(${retryCount}/${cfg.maxRetries})`);
                         clearTimeout(retryTimer);
                         retryTimer = setTimeout(() => {
-                            console.warn('[AutoTTS] 重新生成超时，回退跳过检查');
-                            retryCount = 0;
-                            showToast('重新生成超时，继续循环');
-                        }, 60000);
-                        Generate('regenerate');
+                            console.warn('[AutoTTS] 重新生成超时(120s)，isGenerating:', isGenerating);
+                            if (isGenerating) {
+                                console.warn('[AutoTTS] AI仍在生成，停止生成后继续循环');
+                                const stopGen = SillyTavern?.getContext?.()?.stopGeneration;
+                                if (typeof stopGen === 'function') {
+                                    console.warn('[AutoTTS] 调用 stopGeneration()');
+                                    stopGen();
+                                } else {
+                                    console.warn('[AutoTTS] stopGeneration 不可用，跳过停止');
+                                }
+                                setTimeout(() => {
+                                    retryCount = 0;
+                                    showToast('重新生成超时(仍在生成)，继续循环');
+                                    send();
+                                }, 1000);
+                            } else {
+                                retryCount = 0;
+                                showToast('重新生成超时(未生成)，继续循环');
+                                send();
+                            }
+                        }, 120000);
+                        setTimeout(() => {
+                            console.log('[AutoTTS] 调用 Generate(regenerate), 当前retryCount:', retryCount);
+                            Generate('regenerate');
+                        }, 1500);
                         return;
                     }
                     console.warn(`[AutoTTS] 已达最大重试次数(${cfg.maxRetries})，跳过关键字检查继续循环`);
@@ -353,6 +381,9 @@
         clearInterval(keepAlive);
         clearTimeout(retryTimer);
         rl?.();
+        eventSource.off(event_types.GENERATION_STARTED, onGenStart);
+        eventSource.off(event_types.GENERATION_ENDED, onGenEnd);
+        eventSource.off(event_types.GENERATION_STOPPED, onGenStop);
         if (originalOnStateChange !== null && window.xiaobaixTts && window.xiaobaixTts.player) {
             window.xiaobaixTts.player.onStateChange = originalOnStateChange;
         }
