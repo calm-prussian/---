@@ -96,56 +96,68 @@
         const maxRetries = cfg.findBtnRetries;
         return new Promise((resolve) => {
             const selector = `.mes[mesid="${id}"] .xb-tts-btn.play-btn`;
-            const btn = document.querySelector(selector);
-            if (btn) {
+            const tryClick = () => {
+                const btn = document.querySelector(selector);
+                if (btn) {
+                    btn.click();
+                    return true;
+                }
+                return false;
+            };
+            if (tryClick()) {
                 console.log('[AutoTTS] 找到TTS按钮，点击');
-                btn.click();
                 resolve(true);
                 return;
             }
-            const mes = document.querySelector(`.mes[mesid="${id}"]`);
-            if (!mes) {
-                console.warn('[AutoTTS] 消息元素不存在，无法查找TTS按钮');
-                resolve(false);
-                return;
-            }
-            let observer = null;
-            let pollTimer = null;
-            let timedOut = false;
-
-            const cleanup = () => {
-                if (observer) observer.disconnect();
-                if (pollTimer) clearTimeout(pollTimer);
-            };
-
-            observer = new MutationObserver(() => {
-                if (timedOut) return;
-                const b = mes.querySelector('.xb-tts-btn.play-btn');
-                if (b) {
-                    timedOut = true;
-                    cleanup();
-                    console.log('[AutoTTS] 找到TTS按钮(MutationObserver)，点击');
-                    b.click();
-                    resolve(true);
-                }
-            });
-            observer.observe(mes, { childList: true, subtree: true });
-
-            const timeout = maxRetries * 300 + 500;
-            pollTimer = setTimeout(() => {
-                if (timedOut) return;
-                timedOut = true;
+            let resolved = false;
+            const finish = (found, label) => {
+                if (resolved) return;
+                resolved = true;
                 cleanup();
-                const b2 = mes.querySelector('.xb-tts-btn.play-btn');
-                if (b2) {
-                    console.log('[AutoTTS] 超时前最后检查找到TTS按钮，点击');
-                    b2.click();
-                    resolve(true);
+                if (found) {
+                    console.log(`[AutoTTS] ${label}，找到TTS按钮，点击`);
+                    tryClick();
                 } else {
                     console.warn(`[AutoTTS] ${maxRetries}次查找超时后仍找不到TTS按钮`);
-                    resolve(false);
                 }
-            }, timeout);
+                resolve(found);
+            };
+            let observer = null;
+            let pollInterval = null;
+            let pollCount = 0;
+            const maxPolls = maxRetries;
+            const cleanup = () => {
+                if (observer) observer.disconnect();
+                if (pollInterval) clearInterval(pollInterval);
+            };
+            const chatEl = document.getElementById('chat');
+            if (chatEl) {
+                observer = new MutationObserver(() => {
+                    if (resolved) return;
+                    if (tryClick()) {
+                        finish(true, 'MutationObserver触发');
+                    }
+                });
+                observer.observe(chatEl, { childList: true, subtree: true });
+            }
+            setTimeout(() => {
+                if (resolved) return;
+                if (tryClick()) {
+                    finish(true, '初始延迟后立即找到');
+                    return;
+                }
+                pollInterval = setInterval(() => {
+                    if (resolved) return;
+                    pollCount++;
+                    if (pollCount >= maxPolls) {
+                        finish(false, '');
+                        return;
+                    }
+                    if (tryClick()) {
+                        finish(true, `轮询第${pollCount}次`);
+                    }
+                }, 300);
+            }, 500);
         });
     }
 
