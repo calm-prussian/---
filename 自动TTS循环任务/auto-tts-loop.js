@@ -19,13 +19,16 @@
     const keepAlive = setInterval(() => {}, 60000);
     delete window._atts_state;
 
-    let cfg = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3 };
+    let cfg = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3, findBtnRetries: 10, skipOnBtnFail: true };
+    const CFG_DEFAULTS = { text: '你好，请介绍一下自己。', maxLoop: 0, mustContain: '', maxRetries: 3, findBtnRetries: 10, skipOnBtnFail: true };
 
     try {
         const saved = localStorage.getItem('auto_tts_cfg');
         if (saved) Object.assign(cfg, JSON.parse(saved));
         if (!cfg.mustContain) cfg.mustContain = '';
-        if (!cfg.maxRetries) cfg.maxRetries = 3;
+        if (cfg.maxRetries === undefined) cfg.maxRetries = 3;
+        if (cfg.findBtnRetries === undefined) cfg.findBtnRetries = 10;
+        if (cfg.skipOnBtnFail === undefined) cfg.skipOnBtnFail = true;
     } catch {}
 
     function saveCfg() {
@@ -43,6 +46,7 @@
     }
 
     async function send() {
+        if (stopped) return;
         if (s) return;
         if (cfg.maxLoop > 0 && loopCount >= cfg.maxLoop) {
             console.log(`[AutoTTS] 达到最大循环次数(${cfg.maxLoop})，停止发送`);
@@ -80,6 +84,63 @@
         setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 500); }, 3000);
     }
 
+    function findTtsBtn(id) {
+        const maxRetries = cfg.findBtnRetries;
+        return new Promise((resolve) => {
+            const selector = `.mes[mesid="${id}"] .xb-tts-btn.play-btn`;
+            const btn = document.querySelector(selector);
+            if (btn) {
+                console.log('[AutoTTS] 找到TTS按钮，点击');
+                btn.click();
+                resolve(true);
+                return;
+            }
+            const mes = document.querySelector(`.mes[mesid="${id}"]`);
+            if (!mes) {
+                console.warn('[AutoTTS] 消息元素不存在，无法查找TTS按钮');
+                resolve(false);
+                return;
+            }
+            let observer = null;
+            let pollTimer = null;
+            let timedOut = false;
+
+            const cleanup = () => {
+                if (observer) observer.disconnect();
+                if (pollTimer) clearTimeout(pollTimer);
+            };
+
+            observer = new MutationObserver(() => {
+                if (timedOut) return;
+                const b = mes.querySelector('.xb-tts-btn.play-btn');
+                if (b) {
+                    timedOut = true;
+                    cleanup();
+                    console.log('[AutoTTS] 找到TTS按钮(MutationObserver)，点击');
+                    b.click();
+                    resolve(true);
+                }
+            });
+            observer.observe(mes, { childList: true, subtree: true });
+
+            const timeout = maxRetries * 300 + 500;
+            pollTimer = setTimeout(() => {
+                if (timedOut) return;
+                timedOut = true;
+                cleanup();
+                const b2 = mes.querySelector('.xb-tts-btn.play-btn');
+                if (b2) {
+                    console.log('[AutoTTS] 超时前最后检查找到TTS按钮，点击');
+                    b2.click();
+                    resolve(true);
+                } else {
+                    console.warn(`[AutoTTS] ${maxRetries}次查找超时后仍找不到TTS按钮`);
+                    resolve(false);
+                }
+            }, timeout);
+        });
+    }
+
     let originalOnStateChange = null;
 
     if (window.xiaobaixTts && window.xiaobaixTts.player) {
@@ -87,6 +148,7 @@
         originalOnStateChange = p.onStateChange;
         p.onStateChange = (state, item) => {
             try {
+                if (state === 'progress') return;
                 console.log('[AutoTTS] TTS状态:', state, item?.messageId, lastTriggered);
                 if (typeof originalOnStateChange === 'function') originalOnStateChange(state, item);
                 if (stopped) return;
@@ -109,7 +171,8 @@
         rl = addFloorListener((data) => {
             try {
                 if (stopped) {
-                    console.log('[AutoTTS] 已停止跳过');
+                    console.log('[AutoTTS] 已停止，仍阅读当前回复');
+                    findTtsBtn(id);
                     return;
                 }
                 const id = data.messageId ?? (chat.length - 1);
@@ -138,30 +201,15 @@
                 clearTimeout(retryTimer);
                 retryCount = 0;
 
-                let retries = 0;
-                const tryClick = () => {
-                    const selector = `.mes[mesid="${id}"] .xb-tts-btn.play-btn`;
-                    const btn = document.querySelector(selector);
-                    if (btn) {
-                        console.log('[AutoTTS] 找到TTS按钮，点击');
-                        btn.click();
-                    } else {
-                        console.log(`[AutoTTS] 未找到按钮(retry ${retries}/10)`);
-                        const mes = document.querySelector(`.mes[mesid="${id}"]`);
-                        console.log('[AutoTTS] 消息元素:', mes ? '存在' : '不存在');
-                        if (mes) {
-                            const panel = mes.querySelector('.xb-tts-panel');
-                            console.log('[AutoTTS] TTS面板:', panel ? '存在' : '不存在');
-                        }
-                        if (retries < 10) {
-                            retries++;
-                            setTimeout(tryClick, 300);
-                        } else {
-                            console.warn('[AutoTTS] 10次重试后仍找不到TTS按钮');
-                        }
+                findTtsBtn(id).then(found => {
+                    if (!found && cfg.skipOnBtnFail) {
+                        console.warn('[AutoTTS] TTS按钮未找到，跳过并发送下一条');
+                        showToast('TTS按钮未找到，跳过此条');
+                        lastTriggered = null;
+                        saveState();
+                        send();
                     }
-                };
-                tryClick();
+                });
             } catch (e) {
                 console.error('[AutoTTS] 回调异常:', e);
             }
@@ -178,16 +226,22 @@
         ss.textContent = `
             #atts_panel{position:fixed;inset:0;display:none;align-items:center;justify-content:center;z-index:99999}
             #atts_panel .mask{position:absolute;inset:0;background:rgba(0,0,0,.5)}
-            #atts_panel .card{position:relative;width:min(420px,92vw);background:var(--SmartThemeBlurTintColor,#1a1a1a);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+            #atts_panel .card{position:relative;width:min(420px,92vw);background:var(--SmartThemeBlurTintColor,#1a1a1a);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:12px;display:flex;flex-direction:column;overflow:hidden;max-height:90vh}
             #atts_panel .head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--SmartThemeBorderColor,#333);background:rgba(0,0,0,.3)}
-            #atts_panel .body{padding:16px;display:flex;flex-direction:column;gap:12px}
-            #atts_panel .body label{color:#bbb;font-size:13px;display:block;margin-bottom:4px}
-            #atts_panel .body input,#atts_panel .body textarea{width:100%;background:rgba(0,0,0,.3);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:8px;padding:8px 10px;color:var(--SmartThemeBodyColor,#e9e9e9);resize:vertical;font-size:14px}
-            #atts_panel .body textarea{min-height:80px}
-            .atts_btn{cursor:pointer;border:1px solid var(--SmartThemeBorderColor,#333);border-radius:8px;padding:8px 16px;font-size:14px;color:var(--SmartThemeBodyColor,#e9e9e9);background:rgba(255,255,255,.08)}
+            #atts_panel .body{padding:16px;display:flex;flex-direction:column;gap:14px;overflow-y:auto}
+            #atts_panel .field{display:flex;flex-direction:column;gap:4px}
+            #atts_panel .field-label{color:#bbb;font-size:12px;line-height:1.4}
+            #atts_panel .field-num{width:auto;min-width:70px;max-width:100px;background:rgba(0,0,0,.3);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:6px;padding:6px 8px;color:var(--SmartThemeBodyColor,#e9e9e9);font-size:14px;text-align:center}
+            #atts_panel .field-input{width:100%;background:rgba(0,0,0,.3);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:6px;padding:8px 10px;color:var(--SmartThemeBodyColor,#e9e9e9);font-size:14px;box-sizing:border-box}
+            #atts_panel .field-textarea{width:100%;min-height:70px;background:rgba(0,0,0,.3);border:1px solid var(--SmartThemeBorderColor,#333);border-radius:6px;padding:8px 10px;color:var(--SmartThemeBodyColor,#e9e9e9);font-size:14px;resize:vertical;box-sizing:border-box}
+            #atts_panel .field-hint{color:#666;font-size:11px;margin-top:1px}
+            #atts_panel .check-row{display:flex;align-items:center;gap:8px}
+            #atts_panel .check-row input[type=checkbox]{width:16px;height:16px;flex-shrink:0;accent-color:var(--SmartThemeAccentColor,#3a6);margin:0;cursor:pointer}
+            #atts_panel .check-row .check-label{color:#bbb;font-size:13px;cursor:pointer;user-select:none;line-height:1.3}
+            .atts_btn{cursor:pointer;border:1px solid var(--SmartThemeBorderColor,#333);border-radius:6px;padding:8px 16px;font-size:14px;color:var(--SmartThemeBodyColor,#e9e9e9);background:rgba(255,255,255,.08);transition:background .15s}
             .atts_btn:hover{background:rgba(255,255,255,.15)}
             .atts_primary{background:var(--SmartThemeAccentColor,#3a6);border-color:var(--SmartThemeAccentColor,#3a6);color:#fff}
-            .atts_ops{display:flex;gap:8px;margin-top:4px}
+            .atts_ops{display:flex;gap:8px;margin-top:4px;flex-wrap:wrap}
         `;
         document.head.appendChild(ss);
     }
@@ -207,21 +261,30 @@
                     <b>自动TTS设置</b>
                 </div>
                 <div class="body">
-                    <div>
-                        <label>自动发送文本</label>
-                        <textarea id="atts_text">${esc(cfg.text)}</textarea>
+                    <div class="field">
+                        <div class="field-label">自动发送文本</div>
+                        <textarea class="field-textarea" id="atts_text">${esc(cfg.text)}</textarea>
                     </div>
-                    <div>
-                        <label>循环次数（0=无限）</label>
-                        <input type="number" id="atts_loop" value="${cfg.maxLoop}" min="0" max="999" style="width:100px">
+                    <div class="field">
+                        <div class="field-label">循环次数（0 = 无限）</div>
+                        <input type="number" class="field-num" id="atts_loop" value="${cfg.maxLoop}" min="0" max="999">
                     </div>
-                    <div>
-                        <label>必含关键字（空=不检查）</label>
-                        <input type="text" id="atts_must" value="${esc(cfg.mustContain)}">
+                    <div class="field">
+                        <div class="field-label">必含关键字（空 = 不检查）</div>
+                        <input type="text" class="field-input" id="atts_must" value="${esc(cfg.mustContain)}">
                     </div>
-                    <div>
-                        <label>最大重试次数</label>
-                        <input type="number" id="atts_retry" value="${cfg.maxRetries}" min="0" max="99" style="width:100px">
+                    <div class="field">
+                        <div class="field-label">关键字不匹配时最大重试次数</div>
+                        <input type="number" class="field-num" id="atts_retry" value="${cfg.maxRetries}" min="0" max="99">
+                    </div>
+                    <div class="field">
+                        <div class="field-label">查找TTS按钮重试次数</div>
+                        <input type="number" class="field-num" id="atts_btn_retry" value="${cfg.findBtnRetries}" min="1" max="50">
+                        <div class="field-hint">总超时 ≈ 次数 × 300ms，建议 10~20</div>
+                    </div>
+                    <div class="check-row">
+                        <input type="checkbox" id="atts_skip_btn_fail" ${cfg.skipOnBtnFail ? 'checked' : ''}>
+                        <label class="check-label" for="atts_skip_btn_fail">找不到TTS按钮时跳过并发送下一条</label>
                     </div>
                     <div class="atts_ops">
                         <button class="atts_btn atts_primary" id="atts_start">开始循环</button>
@@ -240,7 +303,11 @@
             cfg.text = document.getElementById('atts_text').value;
             cfg.maxLoop = parseInt(document.getElementById('atts_loop').value) || 0;
             cfg.mustContain = document.getElementById('atts_must').value;
-            cfg.maxRetries = parseInt(document.getElementById('atts_retry').value) || 3;
+            cfg.maxRetries = parseInt(document.getElementById('atts_retry').value);
+            if (isNaN(cfg.maxRetries) || cfg.maxRetries < 0) cfg.maxRetries = 3;
+            cfg.findBtnRetries = parseInt(document.getElementById('atts_btn_retry').value);
+            if (isNaN(cfg.findBtnRetries) || cfg.findBtnRetries < 1) cfg.findBtnRetries = 10;
+            cfg.skipOnBtnFail = document.getElementById('atts_skip_btn_fail').checked;
             retryCount = 0;
             loopCount = 0;
             saveCfg();
