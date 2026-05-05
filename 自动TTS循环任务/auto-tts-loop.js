@@ -170,13 +170,13 @@
     try {
         rl = addFloorListener((data) => {
             try {
+                const id = data.messageId ?? (chat.length - 1);
+                const msg = chat[id];
                 if (stopped) {
                     console.log('[AutoTTS] 已停止，仍阅读当前回复');
                     findTtsBtn(id);
                     return;
                 }
-                const id = data.messageId ?? (chat.length - 1);
-                const msg = chat[id];
                 console.log('[AutoTTS] AI回复完成, messageId:', id);
 
                 if (cfg.mustContain && msg && !String(msg.mes || '').includes(cfg.mustContain)) {
