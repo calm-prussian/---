@@ -29,15 +29,13 @@
     const PANEL_ID = 'xiaobaix-auto-tts-panel';
     const STYLE_ID = 'xiaobaix-auto-tts-style';
     const LOG_PREFIX = '[AutoTTS]';
+    const TTS_FALLBACK_MS = 30000;
 
     const DEFAULT_CONFIG = {
         sendText: '',
         loopCount: 0,
         keyword: '',
-        retryLimit: 3,
-        ttsBtnRetry: 10,
-        ttsBtnTimeout: 500,
-        skipIfNoBtn: true
+        retryLimit: 3
     };
 
     // ========== 日志系统 (去重折叠 + 面板实时显示) ==========
@@ -77,9 +75,6 @@
         parts.push('loop=' + (cfg.loopCount || '∞'));
         if (cfg.keyword) parts.push('keyword=' + cfg.keyword);
         parts.push('retry=' + cfg.retryLimit);
-        parts.push('btnRetry=' + cfg.ttsBtnRetry);
-        parts.push('btnTO=' + cfg.ttsBtnTimeout + 'ms');
-        parts.push('skip=' + cfg.skipIfNoBtn);
         return parts.join(', ');
     }
 
@@ -97,178 +92,70 @@
     }
 
     function saveConfig(cfg) {
-        try {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
-            log('配置已保存');
-        } catch (e) {
-            logErr('配置保存失败:', e);
-        }
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg)); log('配置已保存'); } catch (e) { logErr('配置保存失败:', e); }
     }
 
     let config = loadConfig();
 
     // ========== 运行时状态 ==========
     function loadState() {
-        try {
-            const s = window[STATE_KEY];
-            return s || { currentLoop: 0, retryCount: 0, stopped: true, lastTriggered: null };
-        } catch {
-            return { currentLoop: 0, retryCount: 0, stopped: true, lastTriggered: null };
-        }
+        try { const s = window[STATE_KEY]; return s || { currentLoop: 0, retryCount: 0, stopped: true, lastTriggered: null }; }
+        catch { return { currentLoop: 0, retryCount: 0, stopped: true, lastTriggered: null }; }
     }
-
-    function saveState(s) {
-        try { window[STATE_KEY] = s; } catch (e) { logErr('状态保存失败:', e); }
-    }
+    function saveState(s) { try { window[STATE_KEY] = s; } catch (e) { logErr('状态保存失败:', e); } }
 
     let state = loadState();
     let floorListenerCleanup = null;
     let eventSourceSubscribed = false;
     let keepAliveId = null;
-    let ttsBtnPollTimer = null;
+    let ttsFallbackTimer = null;
     let lastProcessedMsgId = null;
-    let ttsVerifyTarget = null;
-    let ttsVerifyResolve = null;
     let ttsActiveMsgId = null;
 
     // ========== Cleanup ==========
     function cleanup() {
         log('执行 cleanup');
-
-        if (floorListenerCleanup) {
-            try { floorListenerCleanup(); } catch {}
-            floorListenerCleanup = null;
-        }
-
+        if (floorListenerCleanup) { try { floorListenerCleanup(); } catch {} floorListenerCleanup = null; }
         if (eventSourceSubscribed && eventSource && event_types) {
-            try { eventSource.off(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply); } catch {}
-            eventSourceSubscribed = false;
+            try { eventSource.off(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply); } catch {} eventSourceSubscribed = false;
         }
-
-        if (keepAliveId) {
-            clearInterval(keepAliveId);
-            keepAliveId = null;
-        }
-
-        if (ttsBtnPollTimer) {
-            clearTimeout(ttsBtnPollTimer);
-            ttsBtnPollTimer = null;
-        }
-
-        ttsVerifyTarget = null;
-        if (ttsVerifyResolve) { ttsVerifyResolve(false); ttsVerifyResolve = null; }
-
-        if (window.xiaobaixTts?.player?.onStateChange === onTtsStateChange) {
-            window.xiaobaixTts.player.onStateChange = null;
-        }
-
-        [PANEL_ID, STYLE_ID].forEach(id => {
-            const el = document.getElementById(id);
-            if (el) el.remove();
-        });
-
+        if (keepAliveId) { clearInterval(keepAliveId); keepAliveId = null; }
+        if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
+        if (window.xiaobaixTts?.player?.onStateChange === onTtsStateChange) { window.xiaobaixTts.player.onStateChange = null; }
+        [PANEL_ID, STYLE_ID].forEach(id => { const el = document.getElementById(id); if (el) el.remove(); });
         delete window.__autoTTSInitialized;
         delete window[STATE_KEY];
         delete window[LOG_BUF_KEY];
-
         log('cleanup 完成');
     }
 
-    // ========== TTS 辅助 ==========
+    // ========== TTS 触发 ==========
     function getPlayer() {
         return window.xiaobaixTts?.player || null;
     }
 
-    function findTtsBtnEl(messageId) {
-        return document.querySelector(`.mes[mesid="${messageId}"] .xb-tts-btn.play-btn`);
-    }
-
-    async function findAndClickTtsBtn(messageId) {
-        const VERIFY_TIMEOUT = 5000;
-        let buttonFound = false;
-
-        for (let attempt = 0; attempt < config.ttsBtnRetry; attempt++) {
-            if (state.stopped) return { result: 'stopped' };
-
-            if (attempt === 0) log('查找 TTS 按钮, messageId:', messageId);
-            const btn = findTtsBtnEl(messageId);
-
-            if (!btn) {
-                await new Promise(r => { ttsBtnPollTimer = setTimeout(r, config.ttsBtnTimeout); });
-                continue;
-            }
-
-            buttonFound = true;
-            log('TTS 按钮点击 (第', attempt + 1, '次), messageId:', messageId);
-            btn.click();
-
-            if (state.stopped) return { result: 'stopped' };
-            ttsVerifyTarget = messageId;
-            const verified = await new Promise(resolve => {
-                ttsVerifyResolve = resolve;
-                ttsBtnPollTimer = setTimeout(() => {
-                    if (ttsVerifyTarget === messageId) {
-                        ttsVerifyTarget = null;
-                        ttsVerifyResolve = null;
-                        resolve(false);
-                    }
-                }, VERIFY_TIMEOUT);
-            });
-
-            if (verified) {
-                log('TTS 播放已确认, messageId:', messageId);
-                return { result: 'ok' };
-            }
-
-            logWarn('TTS 点击后', VERIFY_TIMEOUT, 'ms 未确认, messageId:', messageId);
-        }
-
-        if (!buttonFound) {
-            logWarn('TTS 按钮始终未找到, messageId:', messageId);
-            return { result: 'no-button' };
-        }
-
-        logWarn('TTS 已点击 ', config.ttsBtnRetry, ' 次但播放未确认, messageId:', messageId);
-        return { result: 'timeout' };
+    function setupFallback(messageId) {
+        if (ttsFallbackTimer) clearTimeout(ttsFallbackTimer);
+        ttsFallbackTimer = setTimeout(() => {
+            if (ttsActiveMsgId === messageId) return;
+            if (state.stopped) return;
+            logWarn('TTS', TTS_FALLBACK_MS / 1000, 's 未播放, 跳过本轮, messageId:', messageId);
+            send().catch(e => logErr('send 异常:', e));
+        }, TTS_FALLBACK_MS);
     }
 
     // ========== 停止循环 ==========
     function stopLoop() {
-        if (state.stopped) {
-            log('已经处于停止状态，跳过');
-            return;
-        }
-
+        if (state.stopped) { log('已经处于停止状态，跳过'); return; }
         log('停止循环');
-        state.stopped = true;
-        saveState(state);
-
-        if (floorListenerCleanup) {
-            try { floorListenerCleanup(); } catch {}
-            floorListenerCleanup = null;
-            log('floorListener 已移除');
-        }
-
+        state.stopped = true; saveState(state);
+        if (floorListenerCleanup) { try { floorListenerCleanup(); } catch {} floorListenerCleanup = null; log('floorListener 已移除'); }
         if (eventSourceSubscribed && eventSource && event_types) {
-            try { eventSource.off(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply); } catch {}
-            eventSourceSubscribed = false;
-            log('eventSource 已取消订阅');
+            try { eventSource.off(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply); } catch {} eventSourceSubscribed = false; log('eventSource 已取消订阅');
         }
-
-        if (ttsBtnPollTimer) {
-            clearTimeout(ttsBtnPollTimer);
-            ttsBtnPollTimer = null;
-        }
-
-        ttsVerifyTarget = null;
-        if (ttsVerifyResolve) { ttsVerifyResolve(false); ttsVerifyResolve = null; }
-
+        if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
         const player = getPlayer();
-        if (player?.onStateChange === onTtsStateChange) {
-            player.onStateChange = null;
-            log('TTS onStateChange 已取消订阅');
-        }
-
+        if (player?.onStateChange === onTtsStateChange) { player.onStateChange = null; log('TTS onStateChange 已取消订阅'); }
         ttsActiveMsgId = null;
         updateStatusBar();
     }
@@ -276,7 +163,6 @@
     // ========== 发送 ==========
     async function send() {
         const SEND_WAIT_MAX = 150;
-
         for (let i = 0; i < SEND_WAIT_MAX; i++) {
             if (state.stopped) return;
             const sb = document.querySelector('#send_but');
@@ -284,21 +170,10 @@
             if (i === 0) log('等待 AI 生成完成...');
             await new Promise(r => setTimeout(r, 200));
         }
-
         const ta = document.querySelector('#send_textarea');
         const sb = document.querySelector('#send_but');
-        if (!ta || !sb) {
-            logErr('找不到发送控件');
-            stopLoop();
-            return;
-        }
-
-        if (sb.disabled) {
-            logErr('发送按钮仍不可用，跳过本轮');
-            stopLoop();
-            return;
-        }
-
+        if (!ta || !sb) { logErr('找不到发送控件'); stopLoop(); return; }
+        if (sb.disabled) { logErr('发送按钮仍不可用，跳过本轮'); stopLoop(); return; }
         log('发送文本:', config.sendText);
         ta.value = config.sendText;
         ta.dispatchEvent(new Event('input', { bubbles: true }));
@@ -308,26 +183,15 @@
 
     // ========== AI 回复回调 ==========
     async function onAiReply(data) {
-        if (state.stopped) {
-            return;
-        }
-
+        if (state.stopped) return;
         const ctx = window.SillyTavern?.getContext?.();
         const currentChat = chat && chat.length ? chat : (ctx?.chat || []);
         const messageId = data?.messageId ?? (currentChat.length > 0 ? currentChat.length - 1 : null);
-
-        if (!Number.isFinite(messageId)) {
-            return;
-        }
-
-        if (messageId === lastProcessedMsgId) {
-            log('跳过重复触发 (messageId:', messageId, ')');
-            return;
-        }
+        if (!Number.isFinite(messageId)) return;
+        if (messageId === lastProcessedMsgId) { log('跳过重复触发 (messageId:', messageId, ')'); return; }
         lastProcessedMsgId = messageId;
 
         log('AI 回复到达, messageId:', messageId, 'currentLoop:', state.currentLoop);
-
         state.currentLoop++;
         log('当前轮次:', state.currentLoop, '/', config.loopCount || '无限');
         saveState(state);
@@ -341,150 +205,73 @@
 
         const mesText = currentChat[messageId]?.mes || '';
         const keyword = config.keyword.trim();
-
         if (keyword && !mesText.includes(keyword)) {
             log('关键字不匹配: 期望"', keyword, '", 回复中未找到');
             if (state.retryCount < config.retryLimit) {
-                state.retryCount++;
-                log('重试 regenerage, 次数:', state.retryCount, '/', config.retryLimit);
-                saveState(state);
-                try {
-                    await Generate('regenerate');
-                } catch (e) {
-                    logErr('regenerate 失败:', e);
-                }
+                state.retryCount++; log('重试 regenerage, 次数:', state.retryCount, '/', config.retryLimit); saveState(state);
+                try { await Generate('regenerate'); } catch (e) { logErr('regenerate 失败:', e); }
                 return;
             }
-            logWarn('关键字重试已达上限, 停止');
-            stopLoop();
-            return;
+            logWarn('关键字重试已达上限, 停止'); stopLoop(); return;
         }
+        if (keyword) { log('关键字匹配成功'); } else { log('无关键字检查要求'); }
+        state.retryCount = 0; saveState(state);
 
-        if (keyword) {
-            log('关键字匹配成功');
-        } else {
-            log('无关键字检查要求');
-        }
-
-        state.retryCount = 0;
-        saveState(state);
-
-        const res = await findAndClickTtsBtn(messageId);
-        if (res.result !== 'ok') {
-            if (res.result === 'no-button') {
-                logWarn('TTS 按钮始终未找到, skipIfNoBtn:', config.skipIfNoBtn);
-                if (config.skipIfNoBtn) {
-                    log('跳过本轮, 继续下一轮');
-                    await send();
-                } else {
-                    log('停止');
-                    stopLoop();
-                }
-            } else if (res.result === 'timeout') {
-                log('TTS 未确认播放, 跳过本轮继续下一轮');
-                await send();
-            }
-        }
+        setupFallback(messageId);
     }
 
+    // ========== TTS 播放回调 ==========
     function onTtsStateChange(playerState, item) {
         const msgId = item?.messageId;
 
-        if (msgId != null && msgId === ttsVerifyTarget && (playerState === 'enqueued' || playerState === 'playing')) {
-            ttsVerifyTarget = null;
-            if (ttsVerifyResolve) { ttsVerifyResolve(true); ttsVerifyResolve = null; }
-        }
-
         if (playerState === 'playing') {
+            if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
             ttsActiveMsgId = msgId;
-        } else if (playerState === 'idle' || playerState === 'stopped' || playerState === 'cleared') {
+        } else if (playerState === 'idle') {
+            ttsActiveMsgId = null;
+            if (state.stopped) { updateStatusBar(); return; }
+            if (config.loopCount > 0 && state.currentLoop >= config.loopCount) { log('已达到循环上限, 停止'); stopLoop(); return; }
+            log('TTS 播放完毕, 触发下一轮发送');
+            setTimeout(() => send().catch(e => logErr('send 异常:', e)), 100);
+        } else if (playerState === 'stopped' || playerState === 'cleared') {
             ttsActiveMsgId = null;
         }
 
         updateStatusBar();
 
-        if (playerState !== 'playing') {
-            return;
-        }
+        if (playerState !== 'playing') return;
 
-        if (msgId == null && msgId !== 0) {
-            logWarn('TTS playing 但无 messageId');
-            return;
-        }
-
-        if (msgId === state.lastTriggered) {
-            log('同条消息重复 playing, 忽略, messageId:', msgId);
-            return;
-        }
+        if (msgId == null && msgId !== 0) { logWarn('TTS playing 但无 messageId'); return; }
+        if (msgId === state.lastTriggered) { log('同条消息重复 playing, 忽略, messageId:', msgId); return; }
 
         log('TTS 开始播放, messageId:', msgId, 'lastTriggered 由', state.lastTriggered, '更新为', msgId);
-        state.lastTriggered = msgId;
-        saveState(state);
-
-        if (state.stopped) {
-            log('已停止，不发送下一轮');
-            return;
-        }
-
-        if (config.loopCount > 0 && state.currentLoop >= config.loopCount) {
-            log('已达到循环上限, 停止');
-            stopLoop();
-            return;
-        }
-
-        log('触发下一轮发送');
-        setTimeout(() => send().catch(e => logErr('send 异常:', e)), 100);
+        state.lastTriggered = msgId; saveState(state);
     }
 
     // ========== 启动循环 ==========
     async function startLoop() {
-        if (!config.sendText.trim()) {
-            alert('[AutoTTS] 请先设置发送文本');
-            logWarn('启动失败: 发送文本为空');
-            return;
-        }
-
+        if (!config.sendText.trim()) { alert('[AutoTTS] 请先设置发送文本'); logWarn('启动失败: 发送文本为空'); return; }
         const player = getPlayer();
-        if (!player) {
-            alert('[AutoTTS] 未检测到 TTS 播放器 (window.xiaobaixTts.player)，请确保小白X扩展已加载');
-            logWarn('启动失败: TTS 播放器未找到');
-            return;
-        }
-
-        if (!state.stopped) {
-            log('先停止当前循环');
-            stopLoop();
-        }
+        if (!player) { alert('[AutoTTS] 未检测到 TTS 播放器，请确保小白X扩展已加载'); logWarn('启动失败: TTS 播放器未找到'); return; }
+        if (!state.stopped) { log('先停止当前循环'); stopLoop(); }
 
         log('========== 开始循环 ==========');
         log('[配置]', formatConfig(config));
 
-        state.stopped = false;
-        state.currentLoop = 0;
-        state.retryCount = 0;
-        state.lastTriggered = null;
-        lastProcessedMsgId = null;
-        ttsVerifyTarget = null;
-        ttsVerifyResolve = null;
-        ttsActiveMsgId = null;
+        state.stopped = false; state.currentLoop = 0; state.retryCount = 0; state.lastTriggered = null;
+        lastProcessedMsgId = null; ttsActiveMsgId = null;
+        if (ttsFallbackTimer) { clearTimeout(ttsFallbackTimer); ttsFallbackTimer = null; }
         saveState(state);
 
-        floorListenerCleanup = addFloorListener(onAiReply, {
-            interval: 1,
-            timing: 'after_ai',
-            floorType: 'llm'
-        });
+        floorListenerCleanup = addFloorListener(onAiReply, { interval: 1, timing: 'after_ai', floorType: 'llm' });
         log('floorListener 已注册 (after_ai, llm)');
-
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply);
         eventSourceSubscribed = true;
         log('eventSource 已订阅 CHARACTER_MESSAGE_RENDERED');
-
         player.onStateChange = onTtsStateChange;
         log('TTS onStateChange 已订阅');
-
+        log('提示: 请确保小白X TTS 的「自动播放」已开启');
         updateStatusBar();
-
         await send();
     }
 
@@ -495,8 +282,7 @@
         style.id = STYLE_ID;
         style.textContent = `
 #${PANEL_ID} {
-    position: fixed; top: 80px; left: 100px;
-    z-index: 99999;
+    position: fixed; top: 80px; left: 100px; z-index: 99999;
     background: #2d2d3f; border: 1px solid #6c5ce7; border-radius: 12px;
     padding: 20px; width: min(440px, calc(100vw - 40px)); max-height: 85vh;
     overflow-y: auto; overflow-x: hidden;
@@ -526,16 +312,12 @@
 #${PANEL_ID} .atts-status-sep { color: #555; }
 #${PANEL_ID} .atts-floor-link { color: #a29bfe; cursor: pointer; text-decoration: underline; }
 #${PANEL_ID} .atts-floor-link:hover { color: #c4b9ff; }
-#${PANEL_ID} .atts-progress-bar {
-    height: 4px; background: #333; border-radius: 2px; overflow: hidden;
-}
+#${PANEL_ID} .atts-progress-bar { height: 4px; background: #333; border-radius: 2px; overflow: hidden; }
 #${PANEL_ID} .atts-progress-fill {
     height: 100%; background: linear-gradient(90deg, #6c5ce7, #00b894);
     border-radius: 2px; transition: width 0.3s;
 }
-#${PANEL_ID} .atts-progress-fill.infinite {
-    width: 30% !important; animation: atts-pulse 1.5s ease-in-out infinite;
-}
+#${PANEL_ID} .atts-progress-fill.infinite { width: 30% !important; animation: atts-pulse 1.5s ease-in-out infinite; }
 @keyframes atts-pulse { 0%,100% { opacity: 0.6; } 50% { opacity: 1; } }
 #${PANEL_ID} .atts-tab-content { display: none; }
 #${PANEL_ID} .atts-tab-content.active { display: block; }
@@ -550,12 +332,8 @@
     display: flex; align-items: center; gap: 6px;
 }
 #${PANEL_ID} .atts-group-title::-webkit-details-marker { display: none; }
-#${PANEL_ID} .atts-group-title::before {
-    content: '▸'; font-size: 10px; transition: transform 0.2s; color: #666;
-}
-#${PANEL_ID} .atts-group[open] > .atts-group-title::before {
-    transform: rotate(90deg); color: #a29bfe;
-}
+#${PANEL_ID} .atts-group-title::before { content: '▸'; font-size: 10px; transition: transform 0.2s; color: #666; }
+#${PANEL_ID} .atts-group[open] > .atts-group-title::before { transform: rotate(90deg); color: #a29bfe; }
 #${PANEL_ID} .atts-group-title:hover { color: #ccc; }
 #${PANEL_ID} .atts-log-list {
     max-height: 350px; overflow-y: auto; background: #1a1a2e;
@@ -570,24 +348,16 @@
 #${PANEL_ID} .atts-log-time { color: #666; margin-right: 6px; }
 #${PANEL_ID} .atts-log-repeat { color: #888; font-size: 10px; }
 #${PANEL_ID} .atts-log-empty { color: #666; text-align: center; padding: 20px 0; }
-#${PANEL_ID} label {
-    display: block; margin-bottom: 4px; color: #b0b0c0; font-size: 12px;
-}
-#${PANEL_ID} textarea,
-#${PANEL_ID} input[type="text"],
-#${PANEL_ID} input[type="number"] {
+#${PANEL_ID} label { display: block; margin-bottom: 4px; color: #b0b0c0; font-size: 12px; }
+#${PANEL_ID} textarea, #${PANEL_ID} input[type="text"], #${PANEL_ID} input[type="number"] {
     width: 100%; padding: 8px; margin-bottom: 12px;
     border: 1px solid #444; border-radius: 6px;
     background: #1a1a2e; color: #e0e0e0; font-size: 13px; box-sizing: border-box;
 }
 #${PANEL_ID} textarea { resize: vertical; min-height: 60px; }
-#${PANEL_ID} .checkbox-row {
-    display: flex; align-items: center; gap: 8px; margin-bottom: 8px;
-}
+#${PANEL_ID} .checkbox-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 #${PANEL_ID} .checkbox-row input[type="checkbox"] { margin: 0; }
-#${PANEL_ID} .btn-row {
-    display: flex; gap: 8px; flex-wrap: wrap;
-}
+#${PANEL_ID} .btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
 #${PANEL_ID} .btn-row button {
     padding: 8px 16px; border-radius: 6px; border: none; cursor: pointer;
     font-size: 13px; font-weight: 600; color: #fff;
@@ -609,11 +379,7 @@
     }
 
     function createPanel() {
-        if (document.getElementById(PANEL_ID)) {
-            log('面板已存在，跳过创建');
-            return;
-        }
-
+        if (document.getElementById(PANEL_ID)) { log('面板已存在，跳过创建'); return; }
         log('创建设置面板');
         const panel = document.createElement('div');
         panel.id = PANEL_ID;
@@ -655,18 +421,6 @@
     <input type="number" id="atts-retry-limit" value="${config.retryLimit}" min="0">
 </details>
 
-<details class="atts-group" open>
-    <summary class="atts-group-title">TTS 选项</summary>
-    <label>查找TTS按钮重试次数</label>
-    <input type="number" id="atts-btn-retry" value="${config.ttsBtnRetry}" min="1">
-    <label>查找TTS按钮轮询间隔 (ms)</label>
-    <input type="number" id="atts-btn-timeout" value="${config.ttsBtnTimeout}" min="100">
-    <div class="checkbox-row">
-        <input type="checkbox" id="atts-skip-no-btn" ${config.skipIfNoBtn ? 'checked' : ''}>
-        <label for="atts-skip-no-btn" style="margin:0">找不到TTS按钮时跳过继续下一轮</label>
-    </div>
-</details>
-
 <div class="btn-row">
     <button id="atts-btn-save" class="btn-save">保存设置</button>
     <button id="atts-btn-close-panel" class="btn-close-panel">关闭</button>
@@ -689,27 +443,10 @@
 `;
         document.body.appendChild(panel);
 
-        // 事件绑定
-        panel.querySelector('#atts-btn-save').addEventListener('click', () => {
-            log('点击: 保存设置');
-            flushPanelToConfig();
-            flashStatusSaved();
-        });
-        panel.querySelector('#atts-btn-close-panel').addEventListener('click', () => {
-            log('点击: 关闭面板');
-            hidePanel();
-        });
-        panel.querySelector('#atts-btn-start').addEventListener('click', () => {
-            log('点击: 开始循环');
-            flushPanelToConfig();
-            startLoop();
-            hidePanel();
-        });
-        panel.querySelector('#atts-btn-stop').addEventListener('click', () => {
-            log('点击: 结束循环');
-            stopLoop();
-        });
-
+        panel.querySelector('#atts-btn-save').addEventListener('click', () => { log('点击: 保存设置'); flushPanelToConfig(); flashStatusSaved(); });
+        panel.querySelector('#atts-btn-close-panel').addEventListener('click', () => { log('点击: 关闭面板'); hidePanel(); });
+        panel.querySelector('#atts-btn-start').addEventListener('click', () => { log('点击: 开始循环'); flushPanelToConfig(); startLoop(); hidePanel(); });
+        panel.querySelector('#atts-btn-stop').addEventListener('click', () => { log('点击: 结束循环'); stopLoop(); });
         panel.querySelector('#atts-tab-settings').addEventListener('click', () => switchTab('settings'));
         panel.querySelector('#atts-tab-log').addEventListener('click', () => switchTab('log'));
         panel.querySelector('#atts-btn-clear-log').addEventListener('click', clearLog);
@@ -724,14 +461,10 @@
             msgEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
             msgEl.style.outline = '3px solid #a29bfe';
             msgEl.style.outlineOffset = '2px';
-            setTimeout(() => {
-                msgEl.style.outline = '';
-                msgEl.style.outlineOffset = '';
-            }, 2000);
+            setTimeout(() => { msgEl.style.outline = ''; msgEl.style.outlineOffset = ''; }, 2000);
             log('跳转到楼层', mesid);
         });
 
-        // 拖拽
         let drag = null;
         const tabs = panel.querySelector('.atts-tabs');
         tabs.addEventListener('mousedown', (e) => {
@@ -753,20 +486,12 @@
         createPanel();
         syncConfigToPanel();
         const panel = document.getElementById(PANEL_ID);
-        if (panel) {
-            panel.classList.remove('hidden');
-            switchTab('settings');
-            updateStatusBar();
-            log('面板打开');
-        }
+        if (panel) { panel.classList.remove('hidden'); switchTab('settings'); updateStatusBar(); log('面板打开'); }
     }
 
     function hidePanel() {
         const panel = document.getElementById(PANEL_ID);
-        if (panel) {
-            panel.classList.add('hidden');
-            log('面板关闭');
-        }
+        if (panel) { panel.classList.add('hidden'); log('面板关闭'); }
     }
 
     function syncConfigToPanel() {
@@ -776,9 +501,6 @@
         panel.querySelector('#atts-loop-count').value = config.loopCount;
         panel.querySelector('#atts-keyword').value = config.keyword || '';
         panel.querySelector('#atts-retry-limit').value = config.retryLimit;
-        panel.querySelector('#atts-btn-retry').value = config.ttsBtnRetry;
-        panel.querySelector('#atts-btn-timeout').value = config.ttsBtnTimeout;
-        panel.querySelector('#atts-skip-no-btn').checked = config.skipIfNoBtn;
     }
 
     function flushPanelToConfig() {
@@ -788,9 +510,6 @@
         config.loopCount = parseInt(panel.querySelector('#atts-loop-count')?.value) || 0;
         config.keyword = panel.querySelector('#atts-keyword')?.value || '';
         config.retryLimit = parseInt(panel.querySelector('#atts-retry-limit')?.value) || 0;
-        config.ttsBtnRetry = parseInt(panel.querySelector('#atts-btn-retry')?.value) || 1;
-        config.ttsBtnTimeout = parseInt(panel.querySelector('#atts-btn-timeout')?.value) || 100;
-        config.skipIfNoBtn = panel.querySelector('#atts-skip-no-btn')?.checked ?? true;
         saveConfig(config);
         log('配置: ' + formatConfig(config));
     }
@@ -827,11 +546,9 @@
         if (running && config.loopCount > 0) {
             pbar.style.display = '';
             const pct = Math.min(100, Math.round(state.currentLoop / config.loopCount * 100));
-            pfill.style.width = pct + '%';
-            pfill.classList.remove('infinite');
+            pfill.style.width = pct + '%'; pfill.classList.remove('infinite');
         } else if (running && config.loopCount === 0) {
-            pbar.style.display = '';
-            pfill.classList.add('infinite');
+            pbar.style.display = ''; pfill.classList.add('infinite');
         } else {
             pbar.style.display = 'none';
         }
@@ -840,12 +557,8 @@
     function flashStatusSaved() {
         const text = document.querySelector('#atts-status-text');
         if (!text) return;
-        text.textContent = '✓ 已保存';
-        text.style.color = '#00b894';
-        setTimeout(() => {
-            text.style.color = '';
-            updateStatusBar();
-        }, 1200);
+        text.textContent = '✓ 已保存'; text.style.color = '#00b894';
+        setTimeout(() => { text.style.color = ''; updateStatusBar(); }, 1200);
     }
 
     function switchTab(name) {
@@ -862,10 +575,7 @@
         const container = document.getElementById('atts-log-list');
         if (!container) return;
         const buf = window[LOG_BUF_KEY];
-        if (!buf || !buf.length) {
-            container.innerHTML = '<div class="atts-log-empty">暂无日志</div>';
-            return;
-        }
+        if (!buf || !buf.length) { container.innerHTML = '<div class="atts-log-empty">暂无日志</div>'; return; }
         container.innerHTML = buf.map(e => {
             const repeat = e.repeat > 1 ? ` <span class="atts-log-repeat">×${e.repeat}</span>` : '';
             return `<div class="atts-log-item ${e.level}"><span class="atts-log-time">${e.time}</span>${escapeHtml(e.msg)}${repeat}</div>`;
@@ -873,76 +583,37 @@
         container.scrollTop = container.scrollHeight;
     }
 
-    function clearLog() {
-        window[LOG_BUF_KEY] = [];
-        log('日志已清空');
-    }
+    function clearLog() { window[LOG_BUF_KEY] = []; log('日志已清空'); }
 
     async function copyLog() {
         const buf = window[LOG_BUF_KEY] || [];
         if (!buf.length) return;
-        const text = buf.map(e => {
-            const repeat = e.repeat > 1 ? ` ×${e.repeat}` : '';
-            return `[${e.time}] ${e.level.toUpperCase()} ${e.msg}${repeat}`;
-        }).join('\n');
-        try {
-            await navigator.clipboard.writeText(text);
-            log('日志已复制到剪贴板');
-        } catch {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            document.body.appendChild(ta);
-            ta.select();
-            document.execCommand('copy');
-            document.body.removeChild(ta);
-            log('日志已复制到剪贴板');
+        const text = buf.map(e => { const r = e.repeat > 1 ? ` ×${e.repeat}` : ''; return `[${e.time}] ${e.level.toUpperCase()} ${e.msg}${r}`; }).join('\n');
+        try { await navigator.clipboard.writeText(text); log('日志已复制到剪贴板'); } catch {
+            const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta); log('日志已复制到剪贴板');
         }
     }
 
     // ========== 状态恢复 ==========
     async function restoreState() {
-        if (state.stopped) {
-            log('上次状态为已停止，不恢复');
-            return;
-        }
-
+        if (state.stopped) { log('上次状态为已停止，不恢复'); return; }
         log('检测到上次运行中状态，尝试恢复...');
         const player = getPlayer();
-        if (!player) {
-            logWarn('恢复失败: TTS 播放器不存在');
-            state.stopped = true;
-            saveState(state);
-            return;
-        }
-
-        floorListenerCleanup = addFloorListener(onAiReply, {
-            interval: 1,
-            timing: 'after_ai',
-            floorType: 'llm'
-        });
+        if (!player) { logWarn('恢复失败: TTS 播放器不存在'); state.stopped = true; saveState(state); return; }
+        floorListenerCleanup = addFloorListener(onAiReply, { interval: 1, timing: 'after_ai', floorType: 'llm' });
         log('floorListener 已恢复');
-
         eventSource.on(event_types.CHARACTER_MESSAGE_RENDERED, onAiReply);
-        eventSourceSubscribed = true;
-        log('eventSource 已恢复');
-
-        player.onStateChange = onTtsStateChange;
-        log('TTS onStateChange 已恢复');
+        eventSourceSubscribed = true; log('eventSource 已恢复');
+        player.onStateChange = onTtsStateChange; log('TTS onStateChange 已恢复');
     }
 
     // ========== 初始化 ==========
-    if (!isFirstRun) {
-        showPanel();
-        return;
-    }
+    if (!isFirstRun) { showPanel(); return; }
 
     injectStyles();
-
     keepAliveId = setInterval(() => {}, 60000);
     log('keepAlive 已启动');
-
     await restoreState();
-
     showPanel();
     log('========== 初始化完成 ==========');
 
