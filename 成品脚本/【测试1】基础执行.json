@@ -1,0 +1,18 @@
+{
+  "type": "script",
+  "enabled": false,
+  "name": "【测试1】基础执行",
+  "id": "48d63cc3-a58b-42c4-a59b-f07d2b6f842e",
+  "content": "//name: 测试1-基础执行\n//author: Test\n(function() {\n    console.log('[测试1] IIFE 被执行了');\n    if (typeof toastr !== 'undefined' && toastr.success) {\n        toastr.success('测试1: toastr 弹出成功!', '酒馆助手测试');\n    }\n    if (typeof window.TavernHelper !== 'undefined') {\n        console.log('[测试1] TavernHelper 存在:', typeof window.TavernHelper);\n        toastr.info('TavernHelper 可用', '酒馆助手测试');\n    } else {\n        console.log('[测试1] TavernHelper 不存在');\n    }\n})();",
+  "info": "测试脚本执行和 toastr",
+  "button": {
+    "enabled": true,
+    "buttons": [
+      {
+        "name": "测试1",
+        "visible": true
+      }
+    ]
+  },
+  "data": {}
+}

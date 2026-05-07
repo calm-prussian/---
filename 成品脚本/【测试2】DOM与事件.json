@@ -1,0 +1,18 @@
+{
+  "type": "script",
+  "enabled": false,
+  "name": "【测试2】DOM与事件",
+  "id": "28f8672c-4930-466f-8789-befd80368169",
+  "content": "//name: 测试2-DOM与事件\n//author: Test\n(function() {\n    console.log('[测试2] IIFE 执行');\n\n    // 1) 测试DOM - 创建红色方块\n    var box = document.createElement('div');\n    box.textContent = '测试2方块';\n    box.style.cssText = 'position:fixed;right:20px;bottom:20px;z-index:99999;width:60px;height:60px;background:red;color:white;display:flex;align-items:center;justify-content:center;border-radius:8px;cursor:pointer;';\n    box.onclick = function() {\n        if (typeof toastr !== 'undefined') toastr.info('方块被点击了!', '测试2');\n    };\n    document.body.appendChild(box);\n    console.log('[测试2] DOM元素已添加, document.body存在:', !!document.body);\n\n    // 2) 测试事件监听 - 听酒馆助手按钮点击\n    if (typeof window.eventOn === 'function' && window.tavern_events) {\n        console.log('[测试2] eventOn 可用, 监听 MESSAGE_RECEIVED');\n        window.eventOn(window.tavern_events.MESSAGE_RECEIVED, function() {\n            console.log('[测试2] MESSAGE_RECEIVED 事件触发');\n        });\n    } else {\n        console.log('[测试2] eventOn 不可用, typeof:', typeof window.eventOn, 'tavern_events:', typeof window.tavern_events);\n    }\n\n    // 3) 测试 iframe_events\n    if (window.iframe_events) {\n        console.log('[测试2] iframe_events 可用:', Object.keys(window.iframe_events).join(', '));\n    } else {\n        console.log('[测试2] iframe_events 不存在');\n    }\n\n    // 4) 测试 triggerSlash\n    if (window.TavernHelper && window.TavernHelper.triggerSlash) {\n        console.log('[测试2] triggerSlash 可用');\n    } else {\n        console.log('[测试2] triggerSlash 不可用');\n    }\n\n    toastr.success('测试2: 页面右下角应有红色方块', '酒馆助手测试');\n})();",
+  "info": "测试DOM创建和事件监听",
+  "button": {
+    "enabled": true,
+    "buttons": [
+      {
+        "name": "测试2",
+        "visible": true
+      }
+    ]
+  },
+  "data": {}
+}
