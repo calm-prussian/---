@@ -529,7 +529,8 @@
             '.ta-log-msg{word-break:break-all;flex:1}' +
             '.ta-log-send{color:#4ecdc4}.ta-log-tts{color:#667eea}.ta-log-info{color:#888}.ta-log-warn{color:#f0ad4e}.ta-log-error{color:#e74c3c}' +
             '#ta-now-playing{position:fixed;right:20px;bottom:20px;z-index:99997;background:rgba(30,30,46,.92);border:1px solid #667eea;border-radius:8px;padding:8px 14px;color:#ddd;font-size:13px;display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s;pointer-events:none;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
-            '#ta-now-playing.visible{opacity:1;transform:translateY(0)}';
+            '#ta-now-playing.visible{opacity:1;transform:translateY(0)}' +
+            '@media(max-width:540px){#ta-panel{width:96vw;max-width:500px;max-height:92vh}#ta-panel-body{padding:10px;font-size:13px}.ta-section{padding:10px}.ta-range-row{flex-wrap:wrap}.ta-range-row input[type=text]{min-width:60px}.ta-start-btn{font-size:13px;padding:8px}#ta-now-playing{right:8px;bottom:8px;max-width:80vw;font-size:12px;padding:6px 10px}}';
         PD().head.appendChild(style);
     }
 
