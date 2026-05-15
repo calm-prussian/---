@@ -13,8 +13,9 @@
     var DEFAULTS = {
         running: false,
         autoSend: { enabled: true, text: '继续', maxRounds: 0, optionMode: 'fixed', optionIndex: 1 },
-        tts: { enabled: true, voice: 'female_1', rate: 0, source: 'raw' },
+        tts: { enabled: true, voice: 'female_1', rate: 0 },
         textFilter: { enabled: false, readEnabled: false, readRanges: [], skipEnabled: false, skipRanges: [] },
+        regexFilter: { enabled: false, disabledIds: [] },
         textResend: { enabled: false, requiredTags: [], maxRetries: 3, retryDelay: 500 }
     };
 
@@ -220,19 +221,53 @@
         if (p < text.length) r += text.slice(p);
         return r;
     }
-    function filterText(text, cfg) {
+    function filterText(text, cfg, skipStrip) {
         if (!text) return '';
         var r = text;
         if (cfg.skipOn && cfg.skip.length) r = applySkip(r, cfg.skip);
         if (cfg.readOn && cfg.read.length) r = applyRead(r, cfg.read);
+        if (skipStrip) return r;
         r = stripHtml(r);
         return r.trim();
+    }
+
+    function parseRegex(str) {
+        try { return window.TavernHelper && window.TavernHelper.builtin ? window.TavernHelper.builtin.parseRegexFromString(str) : null; } catch (e) { return null; }
+    }
+
+    function syncRegexes() {
+        try {
+            var TH = window.TavernHelper;
+            if (!TH || !TH.getTavernRegexes) { addLog('warn', '正则同步: TavernHelper 不可用'); return; }
+            var gList = TH.getTavernRegexes({ type: 'global' }) || [];
+            var cList = [];
+            try { cList = TH.getTavernRegexes({ type: 'character' }) || []; } catch (e) {}
+            syncedRegexes = gList.concat(cList);
+            addLog('info', '正则同步: 获取到 ' + syncedRegexes.length + ' 条正则');
+        } catch (e) { addLog('error', '正则同步失败: ' + e.message); }
+    }
+
+    function applyRegexes(text) {
+        if (!syncedRegexes || !syncedRegexes.length) return text;
+        var disabled = settings.regexFilter.disabledIds || [];
+        var r = text;
+        for (var i = 0; i < syncedRegexes.length; i++) {
+            var rx = syncedRegexes[i];
+            if (!rx.enabled || !rx.source || !rx.source.ai_output) continue;
+            if (!rx.destination || !rx.destination.display) continue;
+            if (disabled.indexOf(rx.id) !== -1) continue;
+            var re = parseRegex(rx.find_regex);
+            if (!re) continue;
+            try { r = r.replace(re, rx.replace_string || ''); } catch (e) {}
+        }
+        return r;
     }
 
     // ============ 状态 ============
     var lastSentId = null, isResending = false, procIds = {}, player = null;
     var panelOpen = false, currentTab = 'control', roundCount = 0;
     var lastOptions = null, regenMid = null;
+    var syncedRegexes = null;
 
     function resetState() { lastSentId = null; isResending = false; procIds = {}; roundCount = 0; lastOptions = null; regenMid = null; }
 
@@ -332,16 +367,6 @@
         doAutoSend();
     }
 
-    function getLatestAIDisplayText() {
-        try {
-            var doc = PD();
-            var mes = doc.querySelectorAll('.mes[is_user="false"]');
-            if (!mes.length) return null;
-            var el = mes[mes.length - 1].querySelector('.mes_text');
-            return el ? (el.innerText || el.textContent || null) : null;
-        } catch (e) { return null; }
-    }
-
     async function processAI(msg) {
         if (!msg || !msg.message || !msg.message.trim()) return;
         var mid = msg.message_id;
@@ -364,17 +389,12 @@
             if (!rs.ok || !settings.running) { delete procIds[mid]; return; }
 
             if (settings.tts.enabled) {
-                var sourceText = rs.text;
-                if (settings.tts.source === 'display') {
-                    await dly(500);
-                    var dt = getLatestAIDisplayText();
-                    if (dt) { sourceText = dt; addLog('info', '使用展示文本(' + dt.length + '字)'); }
-                    else { addLog('warn', '获取展示文本失败, 降级为原文'); }
-                }
                 var fc = settings.textFilter;
-                var text = filterText(sourceText, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
+                var regexOn = settings.regexFilter.enabled;
+                var text = filterText(rs.text, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] }, regexOn);
+                if (regexOn) { text = applyRegexes(text); text = stripHtml(text).trim(); }
                 if (text) {
-                    if (text.length !== raw.length) addLog('info', '文本过滤 ' + raw.length + '→' + text.length + '字');
+                    if (text.length !== rs.text.length) addLog('info', '文本过滤 ' + rs.text.length + '→' + text.length + '字');
                     doTTS(mid, text);
                 } else {
                     addLog('warn', '消息 #' + mid + ' 过滤后为空，跳过TTS');
@@ -435,14 +455,10 @@
         if (!msg) { addLog('warn', '测试: 没有AI消息'); return; }
         var raw = msg.message || '';
         addLog('info', '测试: 获取 #' + msg.message_id + ' (' + raw.length + '字)');
-        var sourceText = raw;
-        if (settings.tts.source === 'display') {
-            var dt = getLatestAIDisplayText();
-            if (dt) { sourceText = dt; addLog('info', '测试: 使用展示文本(' + dt.length + '字)'); }
-            else { addLog('warn', '测试: 获取展示文本失败, 降级为原文'); }
-        }
         var fc = settings.textFilter;
-        var text = filterText(sourceText, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
+        var regexOn = settings.regexFilter.enabled;
+        var text = filterText(raw, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] }, regexOn);
+        if (regexOn) { text = applyRegexes(text); text = stripHtml(text).trim(); }
         if (text.length !== raw.length) addLog('info', '测试: 过滤 ' + raw.length + '→' + text.length + '字');
         if (!text) { addLog('warn', '测试: 过滤后为空'); return; }
         var voice = settings.tts.voice || 'female_1', rate = settings.tts.rate || 0;
@@ -703,8 +719,7 @@
             '<div class="ta-form-row ta-as-optidx-row" style="margin-top:6px;display:' + (s.autoSend.optionMode === 'pick' ? '' : 'none') + ';"><label>选项序号</label><input class="ta-as-optidx" type="number" min="1" max="99" value="' + (s.autoSend.optionIndex || 1) + '"></div>' +
             '<div class="ta-form-row" style="margin-top:6px;"><label>最大轮次</label><input class="ta-max-rounds" type="number" min="0" max="999" value="' + (s.autoSend.maxRounds || 0) + '"><div class="ta-hint" style="margin:0;">0=无限</div></div></div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>🔊 TTS</span><label class="ta-toggle"><input class="ta-tts-toggle" type="checkbox"' + (s.tts.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>文本来源</label><select class="ta-tts-source"><option value="raw"' + (s.tts.source !== 'display' ? ' selected' : '') + '>原始文本</option><option value="display"' + (s.tts.source === 'display' ? ' selected' : '') + '>展示文本(正则后)</option></select></div>' +
-            '<div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>' +
+            '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>' +
             '<div class="ta-form-row"><label>语速</label><input class="ta-tts-rate" type="range" min="-50" max="100" value="' + (s.tts.rate || 0) + '"><span class="ta-rate-val">' + (s.tts.rate || 0) + '%</span></div></div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>✂ 文本过滤</span><label class="ta-toggle"><input class="ta-f-toggle" type="checkbox"' + (s.textFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
             '<div class="' + (s.textFilter.enabled ? '' : 'ta-disabled') + '">' +
@@ -740,6 +755,31 @@
         return html;
     }
 
+    function renderRegexTab(s) {
+        var rx = syncedRegexes || [];
+        var disabled = s.regexFilter.disabledIds || [];
+        var aiRegexes = rx.filter(function(r) { return r.source && r.source.ai_output && r.destination && r.destination.display; });
+        var html = '<div class="ta-section"><div class="ta-section-title"><span>🔧 正则过滤</span><label class="ta-toggle"><input class="ta-rx-toggle" type="checkbox"' + (s.regexFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
+        html += '<div class="' + (s.regexFilter.enabled ? '' : 'ta-disabled') + '">';
+        html += '<div style="margin-bottom:8px;"><button class="ta-btn ta-btn-sm ta-rx-sync">🔄 同步正则</button> <span class="ta-hint" style="margin-left:4px;">从SillyTavern同步AI输出相关的正则脚本</span></div>';
+        if (!aiRegexes.length) {
+            html += '<div class="ta-hint">' + (rx.length ? '没有匹配「AI输出→显示」条件的正则' : '尚未同步，点击上方按钮同步') + '</div>';
+        } else {
+            for (var i = 0; i < aiRegexes.length; i++) {
+                var r = aiRegexes[i];
+                var isDisabled = disabled.indexOf(r.id) !== -1;
+                var name = escH(r.script_name || '未命名');
+                var findStr = escH(r.find_regex || '').slice(0, 60);
+                html += '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;padding:6px 8px;background:rgba(255,255,255,0.03);border-radius:4px;">';
+                html += '<input class="ta-rx-item" type="checkbox" data-id="' + escH(r.id) + '"' + (!isDisabled ? ' checked' : '') + '>';
+                html += '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:bold;">' + name + '</div>';
+                html += '<div class="ta-hint" style="margin:0;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">/' + findStr + '/</div></div></div>';
+            }
+        }
+        html += '</div></div>';
+        return html;
+    }
+
     function refreshPanel() {
         if (!panelOpen) return;
         var panel = PD().getElementById(PANEL_ID);
@@ -751,9 +791,10 @@
 
         var tabs = '<div class="ta-tabs">' +
             '<div class="ta-tab' + (currentTab === 'control' ? ' active' : '') + ' ta-tab-control">控制</div>' +
+            '<div class="ta-tab' + (currentTab === 'regex' ? ' active' : '') + ' ta-tab-regex">正则</div>' +
             '<div class="ta-tab' + (currentTab === 'log' ? ' active' : '') + ' ta-tab-log">日志' + (bc > 0 ? '<span class="ta-badge">' + bc + '</span>' : '') + '</div></div>';
 
-        var content = currentTab === 'control' ? renderControlTab(s) : renderLogTab();
+        var content = currentTab === 'control' ? renderControlTab(s) : currentTab === 'regex' ? renderRegexTab(s) : renderLogTab();
         $(body).html(tabs + '<div class="ta-tab-content">' + content + '</div>');
         bindPanel();
     }
@@ -764,12 +805,27 @@
         var body = $(panel).find('#ta-panel-body');
 
         body.find('.ta-tab-control').click(function() { currentTab = 'control'; refreshPanel(); });
+        body.find('.ta-tab-regex').click(function() { currentTab = 'regex'; refreshPanel(); });
         body.find('.ta-tab-log').click(function() { currentTab = 'log'; refreshPanel(); });
         body.find('.ta-log-copy').click(function() {
             var text = logBuf.map(function(e) { return '[' + e.t + '] [' + e.l + '] ' + e.m; }).join('\n');
             window.parent.navigator.clipboard.writeText(text).then(function() { toastr && toastr.success && toastr.success('已复制到剪贴板', 'TTS自动循环'); });
         });
         body.find('.ta-log-clear').click(function() { logBuf = []; refreshPanel(); });
+
+        if (currentTab === 'regex') {
+            body.find('.ta-rx-toggle').change(function() { settings.regexFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
+            body.find('.ta-rx-sync').click(function() { syncRegexes(); refreshPanel(); });
+            body.on('change', '.ta-rx-item', function() {
+                var id = $(this).attr('data-id');
+                var arr = settings.regexFilter.disabledIds || [];
+                if (this.checked) { arr = arr.filter(function(x) { return x !== id; }); }
+                else { if (arr.indexOf(id) === -1) arr.push(id); }
+                settings.regexFilter.disabledIds = arr;
+                saveSettings();
+            });
+            return;
+        }
 
         if (currentTab !== 'control') return;
 
@@ -782,7 +838,6 @@
         body.find('.ta-as-optidx').on('input', function() { settings.autoSend.optionIndex = Math.max(1, parseInt(this.value, 10) || 1); saveSettings(); });
         body.find('.ta-max-rounds').on('input', function() { settings.autoSend.maxRounds = Math.max(0, parseInt(this.value, 10) || 0); saveSettings(); });
         body.find('.ta-tts-toggle').change(function() { settings.tts.enabled = this.checked; saveSettings(); refreshPanel(); });
-        body.find('.ta-tts-source').change(function() { settings.tts.source = this.value; saveSettings(); });
         body.find('.ta-tts-voice').change(function() { settings.tts.voice = this.value; saveSettings(); });
         body.find('.ta-tts-rate').on('input', function() { settings.tts.rate = parseInt(this.value, 10); body.find('.ta-rate-val').text(this.value + '%'); saveSettings(); });
         body.find('.ta-f-toggle').change(function() { settings.textFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
