@@ -217,8 +217,8 @@
     function filterText(text, cfg) {
         if (!text) return '';
         var r = text;
-        if (cfg.readOn && cfg.read.length) r = applyRead(r, cfg.read);
         if (cfg.skipOn && cfg.skip.length) r = applySkip(r, cfg.skip);
+        if (cfg.readOn && cfg.read.length) r = applyRead(r, cfg.read);
         r = stripHtml(r);
         return r.trim();
     }
@@ -513,10 +513,10 @@
             '<div class="ta2-form-row"><label>语速</label><input class="ta2-tts-rate" type="range" min="-50" max="100" value="' + (s.tts.rate || 0) + '"><span class="ta2-rate-val">' + (s.tts.rate || 0) + '%</span></div></div>' +
             '<div class="ta2-section"><div class="ta2-section-title"><span>✂ 文本过滤</span><label class="ta2-toggle"><input class="ta2-f-toggle" type="checkbox"' + (s.textFilter.enabled ? ' checked' : '') + '><span class="ta2-toggle-slider"></span></label></div>' +
             '<div class="' + (s.textFilter.enabled ? '' : 'ta2-disabled') + '">' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta2-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta2-hint">(先于跳过执行)</span></label>' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta2-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta2-hint">(跳过之后执行)</span></label>' +
             '<div class="ta2-hint">起始留空=从头读，结束留空=读到末尾</div><div class="ta2-read-ranges">' + rRanges(s.textFilter.readRanges || [], 'read') + '</div>' +
             '<button class="ta2-btn ta2-btn-sm ta2-add-read">＋ 添加只读区间</button>' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta2-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta2-hint">(只读之后执行)</span></label>' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta2-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta2-hint">(先于只读执行)</span></label>' +
             '<div class="ta2-hint">起始留空=从头跳，结束留空=跳到末尾</div><div class="ta2-skip-ranges">' + rRanges(s.textFilter.skipRanges || [], 'skip') + '</div>' +
             '<button class="ta2-btn ta2-btn-sm ta2-add-skip">＋ 添加跳过区间</button></div></div>' +
             '<div class="ta2-btn-group"><button class="ta2-btn ta2-test-btn">🔊 测试TTS</button><div style="flex:1"></div><button class="ta2-btn ta2-save-btn">💾 保存</button><button class="ta2-btn ta2-reset-btn">🔄 重置</button></div>';

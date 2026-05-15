@@ -12,8 +12,8 @@
 
     var DEFAULTS = {
         running: false,
-        autoSend: { enabled: true, text: '继续', maxRounds: 0 },
-        tts: { enabled: true, voice: 'female_1', rate: 0 },
+        autoSend: { enabled: true, text: '继续', maxRounds: 0, optionMode: 'fixed', optionIndex: 1 },
+        tts: { enabled: true, voice: 'female_1', rate: 0, source: 'raw' },
         textFilter: { enabled: false, readEnabled: false, readRanges: [], skipEnabled: false, skipRanges: [] },
         textResend: { enabled: false, requiredTags: [], maxRetries: 3, retryDelay: 500 }
     };
@@ -223,8 +223,8 @@
     function filterText(text, cfg) {
         if (!text) return '';
         var r = text;
-        if (cfg.readOn && cfg.read.length) r = applyRead(r, cfg.read);
         if (cfg.skipOn && cfg.skip.length) r = applySkip(r, cfg.skip);
+        if (cfg.readOn && cfg.read.length) r = applyRead(r, cfg.read);
         r = stripHtml(r);
         return r.trim();
     }
@@ -232,12 +232,13 @@
     // ============ 状态 ============
     var lastSentId = null, isResending = false, procIds = {}, player = null;
     var panelOpen = false, currentTab = 'control', roundCount = 0;
+    var lastOptions = null, regenMid = null;
 
-    function resetState() { lastSentId = null; isResending = false; procIds = {}; roundCount = 0; }
+    function resetState() { lastSentId = null; isResending = false; procIds = {}; roundCount = 0; lastOptions = null; regenMid = null; }
 
     // ============ 自动发送 ============
     async function doAutoSend() {
-        if (!settings.running || !settings.autoSend.enabled) return;
+        if (!settings.running || isResending || !settings.autoSend.enabled) return;
         var maxR = settings.autoSend.maxRounds || 0;
         if (maxR > 0 && roundCount >= maxR) {
             addLog('info', '已达最大轮次(' + maxR + ')，停止自动发送');
@@ -245,11 +246,25 @@
             return;
         }
         roundCount++;
+        var mode = settings.autoSend.optionMode || 'fixed';
         var text = settings.autoSend.text || '继续';
-        addLog('send', '自动发送[' + roundCount + (maxR > 0 ? '/' + maxR : '') + ']: ' + text);
+        if (mode === 'random' && lastOptions && lastOptions.length) {
+            text = lastOptions[Math.floor(Math.random() * lastOptions.length)];
+            addLog('send', '自动发送[' + roundCount + (maxR > 0 ? '/' + maxR : '') + '] 随机: ' + text);
+        } else if (mode === 'pick' && lastOptions && lastOptions.length) {
+            var idx = Math.max(0, Math.min((settings.autoSend.optionIndex || 1) - 1, lastOptions.length - 1));
+            text = lastOptions[idx];
+            addLog('send', '自动发送[' + roundCount + (maxR > 0 ? '/' + maxR : '') + '] 选项#' + (idx + 1) + ': ' + text);
+        } else if (mode !== 'fixed' && (!lastOptions || !lastOptions.length)) {
+            addLog('warn', '自动发送[' + roundCount + (maxR > 0 ? '/' + maxR : '') + '] 无选项，降级: ' + text);
+        } else {
+            addLog('send', '自动发送[' + roundCount + (maxR > 0 ? '/' + maxR : '') + ']: ' + text);
+        }
         try {
             await window.TavernHelper.triggerSlash('/send ' + text);
+            if (!settings.running) return;
             await dly(300);
+            if (!settings.running) return;
             await window.TavernHelper.triggerSlash('/trigger');
         } catch (e) {
             addLog('error', '自动发送失败: ' + e.message + '，已停止');
@@ -271,17 +286,25 @@
                 return { ok: true, text: cur };
             }
             addLog('warn', '缺少标签 ' + miss.join(', ') + '，重试(' + (at + 1) + '/' + maxR + ')');
+            if (!settings.running) { addLog('warn', '重发被停止中断'); isResending = false; return { ok: false, text: cur }; }
             isResending = true;
             try {
                 await window.TavernHelper.triggerSlash('/del 1');
                 await dly(delMs);
                 await window.TavernHelper.triggerSlash('/trigger');
-                var nt = '';
+                var nt = '', nid = null;
                 for (var p = 0; p < 60; p++) {
+                    if (!settings.running) break;
                     await dly(500);
                     var msgs = window.TavernHelper.getChatMessages('-1');
-                    if (msgs) for (var i = 0; i < msgs.length; i++) if (msgs[i].role === 'assistant' && msgs[i].message) { nt = msgs[i].message; break; }
+                    if (msgs) for (var i = 0; i < msgs.length; i++) if (msgs[i].role === 'assistant' && msgs[i].message) { nt = msgs[i].message; nid = msgs[i].message_id; break; }
                     if (nt && nt !== cur) break;
+                }
+                if (nt) {
+                    regenMid = nid;
+                    addLog('info', '重试' + (at + 1) + ': 获取到新消息 #' + nid);
+                } else {
+                    addLog('warn', '重试' + (at + 1) + ': 轮询超时(30s), 使用旧文本');
                 }
                 cur = nt || cur;
             } catch (e) {
@@ -303,28 +326,53 @@
     }
 
     function onPlayerStart(item) {
-        if (!settings.running || !settings.autoSend.enabled || !item || !item.id || lastSentId === item.id) return;
+        if (!settings.running || isResending || !settings.autoSend.enabled || !item || !item.id || lastSentId === item.id) return;
         lastSentId = item.id;
         addLog('info', '开始播放 #' + (item.id || ''));
         doAutoSend();
     }
 
+    function getLatestAIDisplayText() {
+        try {
+            var doc = PD();
+            var mes = doc.querySelectorAll('.mes[is_user="false"]');
+            if (!mes.length) return null;
+            var el = mes[mes.length - 1].querySelector('.mes_text');
+            return el ? (el.innerText || el.textContent || null) : null;
+        } catch (e) { return null; }
+    }
+
     async function processAI(msg) {
-        if (!msg || !msg.message || !msg.message.trim() || isResending) return;
+        if (!msg || !msg.message || !msg.message.trim()) return;
         var mid = msg.message_id;
+        if (isResending) { addLog('info', '正在重发中, 跳过消息 #' + mid); return; }
         if (procIds[mid]) return;
         procIds[mid] = true;
 
         var raw = msg.message;
-        addLog('info', '收到AI消息 #' + mid + ' (' + raw.length + '字)');
+        var optMatch = raw.match(/<options>(.*?)<\/options>/);
+        if (optMatch) {
+            lastOptions = optMatch[1].split('|').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
+            addLog('info', '收到AI消息 #' + mid + ' (' + raw.length + '字), 检测到' + lastOptions.length + '个选项');
+        } else {
+            lastOptions = null;
+            addLog('info', '收到AI消息 #' + mid + ' (' + raw.length + '字)');
+        }
 
         try {
             var rs = await ensureTags(raw);
-            if (!rs.ok) { delete procIds[mid]; return; }
+            if (!rs.ok || !settings.running) { delete procIds[mid]; return; }
 
             if (settings.tts.enabled) {
+                var sourceText = rs.text;
+                if (settings.tts.source === 'display') {
+                    await dly(500);
+                    var dt = getLatestAIDisplayText();
+                    if (dt) { sourceText = dt; addLog('info', '使用展示文本(' + dt.length + '字)'); }
+                    else { addLog('warn', '获取展示文本失败, 降级为原文'); }
+                }
                 var fc = settings.textFilter;
-                var text = filterText(rs.text, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
+                var text = filterText(sourceText, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
                 if (text) {
                     if (text.length !== raw.length) addLog('info', '文本过滤 ' + raw.length + '→' + text.length + '字');
                     doTTS(mid, text);
@@ -344,8 +392,15 @@
             msgDebounce = null;
             var m = getLatestAI();
             if (m) {
+                if (regenMid && m.message_id === regenMid) {
+                    addLog('info', '跳过已重发的消息 #' + m.message_id);
+                    regenMid = null;
+                    return;
+                }
                 addLog('info', '消息事件触发, 找到AI #' + m.message_id);
                 processAI(m);
+            } else {
+                addLog('info', '消息事件触发, 未找到AI消息');
             }
         }, 300);
     }
@@ -380,8 +435,14 @@
         if (!msg) { addLog('warn', '测试: 没有AI消息'); return; }
         var raw = msg.message || '';
         addLog('info', '测试: 获取 #' + msg.message_id + ' (' + raw.length + '字)');
+        var sourceText = raw;
+        if (settings.tts.source === 'display') {
+            var dt = getLatestAIDisplayText();
+            if (dt) { sourceText = dt; addLog('info', '测试: 使用展示文本(' + dt.length + '字)'); }
+            else { addLog('warn', '测试: 获取展示文本失败, 降级为原文'); }
+        }
         var fc = settings.textFilter;
-        var text = filterText(raw, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
+        var text = filterText(sourceText, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] });
         if (text.length !== raw.length) addLog('info', '测试: 过滤 ' + raw.length + '→' + text.length + '字');
         if (!text) { addLog('warn', '测试: 过滤后为空'); return; }
         var voice = settings.tts.voice || 'female_1', rate = settings.tts.rate || 0;
@@ -404,7 +465,7 @@
         saveSettings();
         addLog('info', '循环已启动');
         refreshPanel();
-        if (settings.autoSend.enabled && settings.autoSend.text) doAutoSend();
+        if (settings.autoSend.enabled) doAutoSend();
         toastr && toastr.success && toastr.success('TTS自动循环已启动', 'TTS自动循环');
     }
 
@@ -638,16 +699,19 @@
             '<div style="margin-top:6px;font-size:13px;">' + (s.running ? '<span style="color:#4ecdc4;">● 运行中</span>' : '<span style="color:#888;">○ 已停止</span>') + '</div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>📤 自动发送</span><label class="ta-toggle"><input class="ta-as-toggle" type="checkbox"' + (s.autoSend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
             '<div class="' + (s.autoSend.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>发送文本</label><input class="ta-as-text" type="text" value="' + escH(s.autoSend.text || '继续') + '" placeholder="要发送的文本"></div>' +
+            '<div class="ta-form-row"><label>发送模式</label><select class="ta-as-mode"><option value="fixed"' + ((s.autoSend.optionMode || 'fixed') === 'fixed' ? ' selected' : '') + '>固定文本</option><option value="random"' + (s.autoSend.optionMode === 'random' ? ' selected' : '') + '>随机选项</option><option value="pick"' + (s.autoSend.optionMode === 'pick' ? ' selected' : '') + '>指定选项</option></select></div>' +
+            '<div class="ta-form-row ta-as-optidx-row" style="margin-top:6px;display:' + (s.autoSend.optionMode === 'pick' ? '' : 'none') + ';"><label>选项序号</label><input class="ta-as-optidx" type="number" min="1" max="99" value="' + (s.autoSend.optionIndex || 1) + '"></div>' +
             '<div class="ta-form-row" style="margin-top:6px;"><label>最大轮次</label><input class="ta-max-rounds" type="number" min="0" max="999" value="' + (s.autoSend.maxRounds || 0) + '"><div class="ta-hint" style="margin:0;">0=无限</div></div></div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>🔊 TTS</span><label class="ta-toggle"><input class="ta-tts-toggle" type="checkbox"' + (s.tts.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>' +
+            '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>文本来源</label><select class="ta-tts-source"><option value="raw"' + (s.tts.source !== 'display' ? ' selected' : '') + '>原始文本</option><option value="display"' + (s.tts.source === 'display' ? ' selected' : '') + '>展示文本(正则后)</option></select></div>' +
+            '<div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>' +
             '<div class="ta-form-row"><label>语速</label><input class="ta-tts-rate" type="range" min="-50" max="100" value="' + (s.tts.rate || 0) + '"><span class="ta-rate-val">' + (s.tts.rate || 0) + '%</span></div></div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>✂ 文本过滤</span><label class="ta-toggle"><input class="ta-f-toggle" type="checkbox"' + (s.textFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
             '<div class="' + (s.textFilter.enabled ? '' : 'ta-disabled') + '">' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta-hint">(先于跳过执行)</span></label>' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta-hint">(跳过之后执行)</span></label>' +
             '<div class="ta-hint">起始留空=从头读，结束留空=读到末尾</div><div class="ta-read-ranges">' + rRanges(s.textFilter.readRanges || [], 'read') + '</div>' +
             '<button class="ta-btn ta-btn-sm ta-add-read">＋ 添加只读区间</button>' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta-hint">(只读之后执行)</span></label>' +
+            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta-hint">(先于只读执行)</span></label>' +
             '<div class="ta-hint">起始留空=从头跳，结束留空=跳到末尾</div><div class="ta-skip-ranges">' + rRanges(s.textFilter.skipRanges || [], 'skip') + '</div>' +
             '<button class="ta-btn ta-btn-sm ta-add-skip">＋ 添加跳过区间</button></div></div>' +
             '<div class="ta-section"><div class="ta-section-title"><span>🔄 文本重发</span><label class="ta-toggle"><input class="ta-rs-toggle" type="checkbox"' + (s.textResend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
@@ -714,8 +778,11 @@
         body.find('.ta-abort-btn').click(function() { stopCycle(); });
         body.find('.ta-as-toggle').change(function() { settings.autoSend.enabled = this.checked; saveSettings(); refreshPanel(); });
         body.find('.ta-as-text').on('input', function() { settings.autoSend.text = this.value.trim() || '继续'; saveSettings(); });
+        body.find('.ta-as-mode').change(function() { settings.autoSend.optionMode = this.value; saveSettings(); refreshPanel(); });
+        body.find('.ta-as-optidx').on('input', function() { settings.autoSend.optionIndex = Math.max(1, parseInt(this.value, 10) || 1); saveSettings(); });
         body.find('.ta-max-rounds').on('input', function() { settings.autoSend.maxRounds = Math.max(0, parseInt(this.value, 10) || 0); saveSettings(); });
         body.find('.ta-tts-toggle').change(function() { settings.tts.enabled = this.checked; saveSettings(); refreshPanel(); });
+        body.find('.ta-tts-source').change(function() { settings.tts.source = this.value; saveSettings(); });
         body.find('.ta-tts-voice').change(function() { settings.tts.voice = this.value; saveSettings(); });
         body.find('.ta-tts-rate').on('input', function() { settings.tts.rate = parseInt(this.value, 10); body.find('.ta-rate-val').text(this.value + '%'); saveSettings(); });
         body.find('.ta-f-toggle').change(function() { settings.textFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
