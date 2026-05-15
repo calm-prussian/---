@@ -4,7 +4,8 @@
 (function() {
     "use strict";
 
-    var BTN_NAME = 'TTS自动循环';
+    var BTN_NAME = '设置';
+    var BTN_READ = '阅读';
     var PANEL_ID = 'ta-panel';
     var PANEL_OVERLAY_ID = 'ta-panel-overlay';
     var STYLE_ID = 'ta-styles';
@@ -882,6 +883,7 @@
         window._ta_registered = true;
         initOnce();
         eventOn(getButtonEvent(BTN_NAME), function() { if (!panelOpen) openPanel(); });
+        eventOn(getButtonEvent(BTN_READ), function() { toastr && toastr.info && toastr.info('正在朗读最新消息...', 'TTS自动循环'); testTTS(); });
     }
 
     register();
