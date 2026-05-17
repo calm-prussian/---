@@ -13,6 +13,7 @@
 
     var DEFAULTS = {
         running: false,
+        autoRead: false,
         autoSend: { enabled: true, text: '继续', maxRounds: 0, optionMode: 'fixed', optionIndex: 1 },
         tts: { enabled: true, voice: 'female_1', rate: 0 },
         textFilter: { enabled: false, readEnabled: false, readRanges: [], skipEnabled: false, skipRanges: [] },
@@ -169,7 +170,7 @@
         a.onended = function() { var ci = self.cur; done(); self._next(); };
         a.onerror = function() { var ci = self.cur; done(); self._next(); };
         if (this._s) this._s(item);
-        a.play().catch(function() {});
+        a.play().catch(function() { done(); self._next(); });
     };
     AudioQ.prototype._stop = function() { if (this.a) { this.a.pause(); this.a.src = ''; this.a = null; } hideNowPlaying(); };
 
@@ -265,8 +266,8 @@
     }
 
     // ============ 状态 ============
-    var lastSentId = null, isResending = false, procIds = {}, player = null;
-    var panelOpen = false, currentTab = 'control', roundCount = 0;
+    var lastSentId = null, isResending = false, procIds = {}, player = null, isRangeReading = false;
+    var panelOpen = false, currentTab = 'home', roundCount = 0;
     var lastOptions = null, regenMid = null;
     var syncedRegexes = null;
 
@@ -361,8 +362,37 @@
         return null;
     }
 
+    function getAIOnlyMessages() {
+        try {
+            var msgs = window.TavernHelper.getChatMessages('0-{{lastMessageId}}');
+            if (!msgs) return [];
+            var ai = [];
+            for (var i = 0; i < msgs.length; i++) if (msgs[i].role === 'assistant') ai.push(msgs[i]);
+            return ai;
+        } catch (e) { return []; }
+    }
+
+    function getAIMessagesByRange(startFloor, endFloor) {
+        try {
+            var msgs = window.TavernHelper.getChatMessages('0-{{lastMessageId}}');
+            if (!msgs) return [];
+            var total = msgs.length;
+            var start = startFloor > 0 ? startFloor - 1 : total + startFloor;
+            var end = endFloor > 0 ? endFloor - 1 : total + endFloor;
+            if (start > end) { var tmp = start; start = end; end = tmp; }
+            start = Math.max(0, start);
+            end = Math.min(total - 1, end);
+            var ai = [];
+            for (var i = start; i <= end; i++) {
+                if (msgs[i].role === 'assistant') ai.push(msgs[i]);
+            }
+            return ai;
+        } catch (e) { return []; }
+    }
+
     function onPlayerStart(item) {
         if (!settings.running || isResending || !settings.autoSend.enabled || !item || !item.id || lastSentId === item.id) return;
+        if (settings.autoRead) return;
         lastSentId = item.id;
         addLog('info', '开始播放 #' + (item.id || ''));
         doAutoSend();
@@ -373,9 +403,29 @@
         var mid = msg.message_id;
         if (isResending) { addLog('info', '正在重发中, 跳过消息 #' + mid); return; }
         if (procIds[mid]) return;
+        if (!settings.running && !settings.autoRead) return;
         procIds[mid] = true;
 
         var raw = msg.message;
+        if (settings.autoRead) {
+            addLog('info', '自动阅读 #' + mid + ' (' + raw.length + '字)');
+            try {
+                if (settings.tts.enabled) {
+                    var fc = settings.textFilter;
+                    var regexOn = settings.regexFilter.enabled;
+                    var text = filterText(raw, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] }, regexOn);
+                    if (regexOn) { text = applyRegexes(text); text = stripHtml(text).trim(); }
+                    if (text) {
+                        if (text.length !== raw.length) addLog('info', '文本过滤 ' + raw.length + '→' + text.length + '字');
+                        doTTS(mid, text);
+                    } else {
+                        addLog('warn', '消息 #' + mid + ' 过滤后为空，跳过TTS');
+                    }
+                }
+            } catch (e) { addLog('error', '自动阅读 #' + mid + ' 失败: ' + e.message); }
+            finally { delete procIds[mid]; }
+            return;
+        }
         var optMatch = raw.match(/<options>(.*?)<\/options>/);
         if (optMatch) {
             lastOptions = optMatch[1].split('|').map(function(s) { return s.trim(); }).filter(function(s) { return s; });
@@ -407,7 +457,8 @@
 
     var msgDebounce = null;
     function onMsgReceived() {
-        if (!settings.running) return;
+        if (isRangeReading) return;
+        if (!settings.running && !settings.autoRead) return;
         if (msgDebounce) clearTimeout(msgDebounce);
         msgDebounce = setTimeout(function() {
             msgDebounce = null;
@@ -475,9 +526,38 @@
         }
     }
 
+    // ============ 范围朗读 ============
+    async function readRange(startFloor, endFloor) {
+        isRangeReading = true;
+        var msgs = getAIMessagesByRange(startFloor, endFloor);
+        addLog('info', '===== 范围朗读 ' + startFloor + '→' + endFloor + '楼 =====');
+        if (!msgs.length) {
+            addLog('warn', '范围朗读: 指定楼层无AI消息');
+            toastr && toastr.warning && toastr.warning('指定范围内无AI消息', 'TTS自动循环');
+            isRangeReading = false;
+            return;
+        }
+        addLog('info', '范围朗读: 共 ' + msgs.length + ' 条');
+        toastr && toastr.info && toastr.info('朗读 ' + msgs.length + ' 条消息...', 'TTS自动循环');
+        var fc = settings.textFilter;
+        var regexOn = settings.regexFilter.enabled;
+        for (var i = 0; i < msgs.length; i++) {
+            var msg = msgs[i];
+            var raw = msg.message || '';
+            if (!raw.trim()) continue;
+            var text = filterText(raw, { readOn: fc.enabled && fc.readEnabled, read: fc.readRanges || [], skipOn: fc.enabled && fc.skipEnabled, skip: fc.skipRanges || [] }, regexOn);
+            if (regexOn) { text = applyRegexes(text); text = stripHtml(text).trim(); }
+            if (!text) continue;
+            doTTS('rng-' + msg.message_id, text);
+        }
+        isRangeReading = false;
+        addLog('info', '范围朗读: 全部入队完毕');
+    }
+
     // ============ 启动/停止 ============
     function startCycle() {
         settings.running = true;
+        settings.autoRead = false;
         resetState();
         saveSettings();
         addLog('info', '循环已启动');
@@ -505,6 +585,27 @@
         addLog('info', '循环已暂停（TTS继续播完）');
         refreshPanel();
         toastr && toastr.info && toastr.info('循环已暂停，TTS继续朗读完毕', 'TTS自动循环');
+    }
+
+    function startAutoRead() {
+        settings.autoRead = true;
+        settings.running = false;
+        resetState();
+        saveSettings();
+        addLog('info', '自动阅读已启动');
+        refreshPanel();
+        var m = getLatestAI();
+        if (m && m.message && m.message.trim()) processAI(m);
+        toastr && toastr.success && toastr.success('自动阅读已启动', 'TTS自动循环');
+    }
+
+    function stopAutoRead() {
+        settings.autoRead = false;
+        if (player) player.clear();
+        saveSettings();
+        addLog('info', '自动阅读已停止');
+        refreshPanel();
+        toastr && toastr.info && toastr.info('自动阅读已停止', 'TTS自动循环');
     }
 
     // ============ UI ============
@@ -573,17 +674,20 @@
             '.ta-toggle input:checked+.ta-toggle-slider::before{transform:translateX(18px)}' +
             '.ta-form-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}' +
             '.ta-form-row label{min-width:50px;font-size:13px;white-space:nowrap}' +
-            '.ta-form-row select,.ta-form-row input[type=number],.ta-form-row input[type=text]{flex:1;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:13px}' +
+            '.ta-form-row select,.ta-form-row input[type=number],.ta-form-row input[type=text]{flex:1;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:13px;box-sizing:border-box}' +
             '.ta-form-row input[type=range]{flex:1}' +
-            '.ta-textarea{width:100%;min-height:60px;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:6px 8px;font-size:13px;resize:vertical;font-family:inherit}' +
-            '.ta-range-row{display:flex;align-items:center;gap:6px;margin-bottom:6px;padding:4px 6px;background:rgba(255,255,255,.03);border-radius:4px}' +
-            '#ta-panel .ta-range-row input[type=text]{flex:1;min-width:0;background:#2a2a3a!important;color:#ccc!important;border:1px solid #555!important;border-radius:4px;padding:3px 6px;font-size:12px}' +
-            '.ta-range-row .ta-sep{color:#888}' +
+            '.ta-textarea{width:100%;min-height:60px;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:6px 8px;font-size:13px;resize:vertical;font-family:inherit;box-sizing:border-box}' +
+            '.ta-range-row{position:relative;display:flex;flex-direction:column;gap:2px;margin-bottom:8px;padding:8px 10px;background:rgba(255,255,255,.03);border-radius:4px}' +
+            '.ta-range-field{display:flex;align-items:center;gap:6px}' +
+            '.ta-range-label{min-width:32px;font-size:12px;color:#888;white-space:nowrap}' +
+            '.ta-range-arrow{text-align:center;color:#667eea;font-size:13px;line-height:1}' +
+            '#ta-panel .ta-range-row input[type=text]{flex:1;min-width:0;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:3px 6px;font-size:12px;box-sizing:border-box;overflow:hidden}' +
+            '.ta-range-row .ta-rm-range{position:absolute;top:6px;right:6px}' +
             '.ta-btn{background:#667eea;color:#fff;border:none;border-radius:4px;padding:5px 12px;cursor:pointer;font-size:13px}' +
             '.ta-btn:hover{background:#5a6fd6}' +
             '.ta-btn-sm{padding:2px 8px;font-size:12px}' +
             '.ta-btn-danger{background:#e74c3c}' +
-            '.ta-btn-danger:hover{background:#c0392b}' +
+            '.ta-btn-danger:hover{background:#c0392b}.ta-status-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}.ta-status-card{padding:8px 12px;border-radius:6px;font-size:13px;text-align:center;transition:background .2s}.ta-status-card.on{background:rgba(78,205,196,.15);border:1px solid rgba(78,205,196,.3);color:#4ecdc4}.ta-status-card.off{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.08);color:#888}' +
             '.ta-btn-group{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}' +
             '.ta-hint{font-size:11px;color:#888;margin-top:2px}' +
             '.ta-disabled{opacity:.5;pointer-events:none}' +
@@ -591,7 +695,7 @@
             '.ta-tag-item{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;background:rgba(102,126,234,.2);border-radius:12px;font-size:12px}' +
             '.ta-tag-item .ta-tag-rm{cursor:pointer;color:#e74c3c;font-weight:bold;font-size:14px;line-height:1}' +
             '.ta-tag-input-row{display:flex;gap:6px}' +
-            '.ta-tag-input-row input{flex:1;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:12px}' +
+            '.ta-tag-input-row input{flex:1;background:#333;color:#ddd;border:1px solid #555;border-radius:4px;padding:4px 8px;font-size:12px;box-sizing:border-box}' +
             '.ta-rate-val{min-width:36px;text-align:center;font-size:13px}' +
             '.ta-start-btn{flex:1;padding:10px;font-size:15px;font-weight:bold;border-radius:8px;cursor:pointer;border:none}' +
             '.ta-start-btn.start{background:#4ecdc4;color:#1e1e2e}' +
@@ -608,7 +712,7 @@
             '.ta-log-send{color:#4ecdc4}.ta-log-tts{color:#667eea}.ta-log-info{color:#888}.ta-log-warn{color:#f0ad4e}.ta-log-error{color:#e74c3c}' +
             '#ta-now-playing{position:fixed;right:20px;bottom:20px;z-index:99997;background:rgba(30,30,46,.92);border:1px solid #667eea;border-radius:8px;padding:8px 14px;color:#ddd;font-size:13px;display:flex;align-items:center;gap:8px;opacity:0;transform:translateY(10px);transition:opacity .3s,transform .3s;pointer-events:none;max-width:360px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
             '#ta-now-playing.visible{opacity:1;transform:translateY(0)}' +
-            '@media(max-width:540px){#ta-panel{width:96vw;max-width:500px;max-height:92vh}#ta-panel-body{padding:10px;font-size:13px}.ta-section{padding:10px}.ta-range-row{flex-wrap:wrap}.ta-range-row input[type=text]{min-width:60px}.ta-start-btn{font-size:13px;padding:8px}#ta-now-playing{right:8px;bottom:8px;max-width:80vw;font-size:12px;padding:6px 10px}}';
+            '@media(max-width:540px){#ta-panel{width:96vw;max-width:500px;max-height:92vh}#ta-panel-body{padding:10px;font-size:13px}.ta-section{padding:10px}.ta-range-row{padding:6px 8px}.ta-range-row input[type=text]{min-width:60px}.ta-start-btn{font-size:13px;padding:8px}#ta-now-playing{right:8px;bottom:8px;max-width:80vw;font-size:12px;padding:6px 10px}}';
         PD().head.appendChild(style);
     }
 
@@ -667,7 +771,7 @@
         if (p.length) p.css({ left: '', top: '', transform: '' });
         $(PD().getElementById(PANEL_OVERLAY_ID)).addClass('visible');
         $(PD().getElementById(PANEL_ID)).addClass('visible');
-        currentTab = 'control';
+        currentTab = 'home';
         refreshPanel();
     }
 
@@ -682,10 +786,10 @@
         if (!ranges.length) return '<div class="ta-hint">无</div>';
         return ranges.map(function(r, i) {
             return '<div class="ta-range-row" data-idx="' + i + '" data-type="' + type + '">' +
-                '<input class="ta-range-start" value="' + escH(r.start || '') + '" placeholder="起始">' +
-                '<span class="ta-sep">→</span>' +
-                '<input class="ta-range-end" value="' + escH(r.end || '') + '" placeholder="结束">' +
-                '<button class="ta-btn ta-btn-sm ta-btn-danger ta-rm-range">✕</button></div>';
+                '<button class="ta-btn ta-btn-sm ta-btn-danger ta-rm-range">✕</button>' +
+                '<div class="ta-range-field"><span class="ta-range-label">起始</span><input class="ta-range-start" type="text" value="' + escH(r.start || '') + '" placeholder="起始"></div>' +
+                '<div class="ta-range-arrow">↓</div>' +
+                '<div class="ta-range-field"><span class="ta-range-label">结束</span><input class="ta-range-end" type="text" value="' + escH(r.end || '') + '" placeholder="结束"></div></div>';
         }).join('');
     }
     function rTags(tags) {
@@ -707,36 +811,95 @@
         return 'ℹ️';
     }
 
-    function renderControlTab(s) {
-        var vopts = EDGE_VOICES.map(function(v) { return '<option value="' + escH(v.key) + '"' + (s.tts.voice === v.key ? ' selected' : '') + '>' + escH(v.name) + ' (' + escH(v.tag) + ')</option>'; }).join('');
-        return '<div style="text-align:center;margin-bottom:4px;">' +
+
+    function stCard(label, icon, on) {
+        return '<div class="ta-status-card' + (on ? ' on' : '') + '">' + icon + ' ' + label + '</div>';
+    }
+
+    function renderHomeTab(s) {
+        var html = '';
+        html += '<div class="ta-section"><div class="ta-section-title"><span>🔄 循环模式</span></div>';
+        html += '<div style="text-align:center;margin-bottom:4px;">' +
             (s.running
                 ? '<div class="ta-ctl-row"><button class="ta-start-btn pause ta-pause-btn">⏸ 暂 停</button><button class="ta-start-btn abort ta-abort-btn">■ 终 止</button></div>'
                 : '<button class="ta-start-btn start ta-ctl-btn">▶ 开 始</button>') +
-            '<div style="margin-top:6px;font-size:13px;">' + (s.running ? '<span style="color:#4ecdc4;">● 运行中</span>' : '<span style="color:#888;">○ 已停止</span>') + '</div></div>' +
-            '<div class="ta-section"><div class="ta-section-title"><span>📤 自动发送</span><label class="ta-toggle"><input class="ta-as-toggle" type="checkbox"' + (s.autoSend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.autoSend.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>发送文本</label><input class="ta-as-text" type="text" value="' + escH(s.autoSend.text || '继续') + '" placeholder="要发送的文本"></div>' +
-            '<div class="ta-form-row"><label>发送模式</label><select class="ta-as-mode"><option value="fixed"' + ((s.autoSend.optionMode || 'fixed') === 'fixed' ? ' selected' : '') + '>固定文本</option><option value="random"' + (s.autoSend.optionMode === 'random' ? ' selected' : '') + '>随机选项</option><option value="pick"' + (s.autoSend.optionMode === 'pick' ? ' selected' : '') + '>指定选项</option></select></div>' +
-            '<div class="ta-form-row ta-as-optidx-row" style="margin-top:6px;display:' + (s.autoSend.optionMode === 'pick' ? '' : 'none') + ';"><label>选项序号</label><input class="ta-as-optidx" type="number" min="1" max="99" value="' + (s.autoSend.optionIndex || 1) + '"></div>' +
-            '<div class="ta-form-row" style="margin-top:6px;"><label>最大轮次</label><input class="ta-max-rounds" type="number" min="0" max="999" value="' + (s.autoSend.maxRounds || 0) + '"><div class="ta-hint" style="margin:0;">0=无限</div></div></div></div>' +
-            '<div class="ta-section"><div class="ta-section-title"><span>🔊 TTS</span><label class="ta-toggle"><input class="ta-tts-toggle" type="checkbox"' + (s.tts.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '"><div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>' +
-            '<div class="ta-form-row"><label>语速</label><input class="ta-tts-rate" type="range" min="-50" max="100" value="' + (s.tts.rate || 0) + '"><span class="ta-rate-val">' + (s.tts.rate || 0) + '%</span></div></div></div>' +
-            '<div class="ta-section"><div class="ta-section-title"><span>✂ 文本过滤</span><label class="ta-toggle"><input class="ta-f-toggle" type="checkbox"' + (s.textFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.textFilter.enabled ? '' : 'ta-disabled') + '">' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta-hint">(跳过之后执行)</span></label>' +
-            '<div class="ta-hint">起始留空=从头读，结束留空=读到末尾</div><div class="ta-read-ranges">' + rRanges(s.textFilter.readRanges || [], 'read') + '</div>' +
-            '<button class="ta-btn ta-btn-sm ta-add-read">＋ 添加只读区间</button>' +
-            '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta-hint">(先于只读执行)</span></label>' +
-            '<div class="ta-hint">起始留空=从头跳，结束留空=跳到末尾</div><div class="ta-skip-ranges">' + rRanges(s.textFilter.skipRanges || [], 'skip') + '</div>' +
-            '<button class="ta-btn ta-btn-sm ta-add-skip">＋ 添加跳过区间</button></div></div>' +
-            '<div class="ta-section"><div class="ta-section-title"><span>🔄 文本重发</span><label class="ta-toggle"><input class="ta-rs-toggle" type="checkbox"' + (s.textResend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>' +
-            '<div class="' + (s.textResend.enabled ? '' : 'ta-disabled') + '">' +
-            '<div class="ta-tag-list ta-rs-tags">' + rTags(s.textResend.requiredTags || []) + '</div>' +
-            '<div class="ta-tag-input-row"><input class="ta-rs-tag-input" type="text" placeholder="输入标签（如 &lt;thinking&gt;）"><button class="ta-btn ta-btn-sm ta-add-tag">添加</button></div>' +
-            '<div class="ta-form-row" style="margin-top:8px;"><label>最大重试</label><input class="ta-rs-retries" type="number" min="1" max="50" value="' + (s.textResend.maxRetries || 3) + '"></div>' +
-            '<div class="ta-form-row"><label>间隔(ms)</label><input class="ta-rs-delay" type="number" min="0" max="30000" step="100" value="' + (s.textResend.retryDelay || 500) + '"></div></div></div>' +
-            '<div class="ta-btn-group"><button class="ta-btn ta-test-tts-btn" style="margin-right:auto;">🔊 测试TTS</button><button class="ta-btn ta-save-btn">💾 保存设置</button><button class="ta-btn ta-reset-btn">🔄 重置默认</button></div>';
+            '<div style="margin-top:6px;font-size:13px;">' + (s.running ? '<span style="color:#4ecdc4;">● 运行中</span>' : '<span style="color:#888;">○ 已停止</span>') + '</div>';
+        html += '<div class="ta-hint">TTS朗读 + 自动发送循环</div></div></div>';
+
+        html += '<div class="ta-section"><div class="ta-section-title"><span>👁 纯阅读模式</span></div>';
+        html += '<div style="display:flex;align-items:center;gap:10px;">' +
+            '<label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer;">' +
+            '<input class="ta-ar-toggle" type="checkbox"' + (s.autoRead ? ' checked' : '') + '> 自动阅读</label>' +
+            (s.autoRead ? '<span style="color:#4ecdc4;font-size:13px;">● 已启动</span>' : '<span style="color:#888;font-size:13px;">○ 已停止</span>') +
+            '</div>';
+        html += '<div class="ta-hint">不发送消息，仅朗读新回复</div></div>';
+
+        html += '<div class="ta-status-grid">' +
+            stCard('自动发送', '📤', s.autoSend.enabled) +
+            stCard('TTS朗读', '🔊', s.tts.enabled) +
+            stCard('文本过滤', '✂', s.textFilter.enabled) +
+            stCard('文本重发', '🔄', s.textResend.enabled) +
+            stCard('正则过滤', '🔧', s.regexFilter.enabled) +
+            '</div>';
+
+        html += '<div class="ta-section"><div class="ta-section-title"><span>📖 范围朗读</span></div>' +
+            '<div><div class="ta-form-row" style="flex-wrap:wrap;gap:6px;">' +
+            '<label style="min-width:auto;">起始楼层</label><input class="ta-rng-start" type="number" value="1" min="-999" max="999" style="width:52px;">' +
+            '<label style="min-width:auto;">结束楼层</label><input class="ta-rng-end" type="number" value="-1" min="-999" max="999" style="width:52px;">' +
+            '<button class="ta-btn ta-btn-sm ta-rng-read" style="margin-left:4px;">▶ 朗读</button>' +
+            '<span class="ta-hint ta-rng-count" style="margin-left:8px;"></span>' +
+            '</div><div class="ta-hint" style="margin-top:4px;">负数=倒数（-1=最新），正数=与酒馆楼层号一致</div></div></div>';
+
+        html += '<div class="ta-btn-group"><button class="ta-btn ta-test-tts-btn" style="margin-right:auto;">🔊 测试TTS</button>' +
+            '<button class="ta-btn ta-save-btn">💾 保存设置</button>' +
+            '<button class="ta-btn ta-reset-btn">🔄 重置默认</button></div>';
+        return html;
+    }
+
+    function renderSendTab(s) {
+        var html = '<div class="ta-section"><div class="ta-section-title"><span>\uD83D\uDCE4 自动发送</span><label class="ta-toggle"><input class="ta-as-toggle" type="checkbox"' + (s.autoSend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
+        html += '<div class="' + (s.autoSend.enabled ? '' : 'ta-disabled') + '">';
+        html += '<div class="ta-form-row"><label>发送文本</label><input class="ta-as-text" type="text" value="' + escH(s.autoSend.text || '继续') + '" placeholder="要发送的文本"></div>';
+        html += '<div class="ta-form-row"><label>发送模式</label><select class="ta-as-mode"><option value="fixed"' + ((s.autoSend.optionMode || 'fixed') === 'fixed' ? ' selected' : '') + '>固定文本</option><option value="random"' + (s.autoSend.optionMode === 'random' ? ' selected' : '') + '>随机选项</option><option value="pick"' + (s.autoSend.optionMode === 'pick' ? ' selected' : '') + '>指定选项</option></select></div>';
+        html += '<div class="ta-form-row ta-as-optidx-row" style="margin-top:6px;display:' + (s.autoSend.optionMode === 'pick' ? '' : 'none') + ';"><label>选项序号</label><input class="ta-as-optidx" type="number" min="1" max="99" value="' + (s.autoSend.optionIndex || 1) + '"></div>';
+        html += '<div class="ta-form-row" style="margin-top:6px;"><label>最大轮次</label><input class="ta-max-rounds" type="number" min="0" max="999" value="' + (s.autoSend.maxRounds || 0) + '"><div class="ta-hint" style="margin:0;">0=无限</div></div>';
+        html += '</div></div>';
+        return html;
+    }
+
+    function renderTTSTab(s) {
+        var vopts = EDGE_VOICES.map(function(v) { return '<option value="' + escH(v.key) + '"' + (s.tts.voice === v.key ? ' selected' : '') + '>' + escH(v.name) + ' (' + escH(v.tag) + ')</option>'; }).join('');
+        var html = '<div class="ta-section"><div class="ta-section-title"><span>\uD83D\uDD0A TTS朗读</span><label class="ta-toggle"><input class="ta-tts-toggle" type="checkbox"' + (s.tts.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
+        html += '<div class="' + (s.tts.enabled ? '' : 'ta-disabled') + '">';
+        html += '<div class="ta-form-row"><label>音色</label><select class="ta-tts-voice">' + vopts + '</select></div>';
+        html += '<div class="ta-form-row"><label>语速</label><input class="ta-tts-rate" type="range" min="-50" max="100" value="' + (s.tts.rate || 0) + '"><span class="ta-rate-val">' + (s.tts.rate || 0) + '%</span></div>';
+        html += '</div></div>';
+        html += '<div style="text-align:center;margin-top:8px;"><button class="ta-btn ta-test-tts-btn">\uD83D\uDD0A 测试TTS</button></div>';
+        return html;
+    }
+
+    function renderFilterTab(s) {
+        var html = '<div class="ta-section"><div class="ta-section-title"><span>\u2702 文本过滤</span><label class="ta-toggle"><input class="ta-f-toggle" type="checkbox"' + (s.textFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
+        html += '<div class="' + (s.textFilter.enabled ? '' : 'ta-disabled') + '">';
+        html += '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:4px;"><input class="ta-read-on" type="checkbox"' + (s.textFilter.readEnabled ? ' checked' : '') + '><b>只读区间</b><span class="ta-hint">(跳过之后执行)</span></label>';
+        html += '<div class="ta-hint">起始留空=从头读，结束留空=读到末尾</div><div class="ta-read-ranges">' + rRanges(s.textFilter.readRanges || [], 'read') + '</div>';
+        html += '<button class="ta-btn ta-btn-sm ta-add-read">＋ 添加只读区间</button>';
+        html += '<label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-top:10px;margin-bottom:4px;"><input class="ta-skip-on" type="checkbox"' + (s.textFilter.skipEnabled ? ' checked' : '') + '><b>跳过区间</b><span class="ta-hint">(先于只读执行)</span></label>';
+        html += '<div class="ta-hint">起始留空=从头跳，结束留空=跳到末尾</div><div class="ta-skip-ranges">' + rRanges(s.textFilter.skipRanges || [], 'skip') + '</div>';
+        html += '<button class="ta-btn ta-btn-sm ta-add-skip">＋ 添加跳过区间</button>';
+        html += '</div></div>';
+        return html;
+    }
+
+    function renderResendTab(s) {
+        var html = '<div class="ta-section"><div class="ta-section-title"><span>\uD83D\uDD04 文本重发</span><label class="ta-toggle"><input class="ta-rs-toggle" type="checkbox"' + (s.textResend.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
+        html += '<div class="' + (s.textResend.enabled ? '' : 'ta-disabled') + '">';
+        html += '<div class="ta-tag-list ta-rs-tags">' + rTags(s.textResend.requiredTags || []) + '</div>';
+        html += '<div class="ta-tag-input-row"><input class="ta-rs-tag-input" type="text" placeholder="输入标签（如 &lt;thinking&gt;）"><button class="ta-btn ta-btn-sm ta-add-tag">添加</button></div>';
+        html += '<div class="ta-form-row" style="margin-top:8px;"><label>最大重试</label><input class="ta-rs-retries" type="number" min="1" max="50" value="' + (s.textResend.maxRetries || 3) + '"></div>';
+        html += '<div class="ta-form-row"><label>间隔(ms)</label><input class="ta-rs-delay" type="number" min="0" max="30000" step="100" value="' + (s.textResend.retryDelay || 500) + '"></div>';
+        html += '</div></div>';
+        return html;
     }
 
     function renderLogTab() {
@@ -762,6 +925,9 @@
         var aiRegexes = rx.filter(function(r) { return r.source && r.source.ai_output && r.destination && r.destination.display; });
         var html = '<div class="ta-section"><div class="ta-section-title"><span>🔧 正则过滤</span><label class="ta-toggle"><input class="ta-rx-toggle" type="checkbox"' + (s.regexFilter.enabled ? ' checked' : '') + '><span class="ta-toggle-slider"></span></label></div>';
         html += '<div class="' + (s.regexFilter.enabled ? '' : 'ta-disabled') + '">';
+        if (s.regexFilter.enabled && !aiRegexes.length) {
+            html += '<div style="color:#f0ad4e;font-size:12px;margin-bottom:8px;padding:6px 10px;background:rgba(240,173,78,.1);border:1px solid rgba(240,173,78,.3);border-radius:4px;">⚠ 正则过滤已开启，但尚未同步正则列表，点击下方按钮同步</div>';
+        }
         html += '<div style="margin-bottom:8px;"><button class="ta-btn ta-btn-sm ta-rx-sync">🔄 同步正则</button> <span class="ta-hint" style="margin-left:4px;">从SillyTavern同步AI输出相关的正则脚本</span></div>';
         if (!aiRegexes.length) {
             html += '<div class="ta-hint">' + (rx.length ? '没有匹配「AI输出→显示」条件的正则' : '尚未同步，点击上方按钮同步') + '</div>';
@@ -781,6 +947,7 @@
         return html;
     }
 
+
     function refreshPanel() {
         if (!panelOpen) return;
         var panel = PD().getElementById(PANEL_ID);
@@ -791,11 +958,24 @@
         var bc = badLogCount();
 
         var tabs = '<div class="ta-tabs">' +
-            '<div class="ta-tab' + (currentTab === 'control' ? ' active' : '') + ' ta-tab-control">控制</div>' +
+            '<div class="ta-tab' + (currentTab === 'home' ? ' active' : '') + ' ta-tab-home">首页</div>' +
+            '<div class="ta-tab' + (currentTab === 'send' ? ' active' : '') + ' ta-tab-send">发送</div>' +
+            '<div class="ta-tab' + (currentTab === 'tts' ? ' active' : '') + ' ta-tab-tts">TTS</div>' +
+            '<div class="ta-tab' + (currentTab === 'filter' ? ' active' : '') + ' ta-tab-filter">过滤</div>' +
+            '<div class="ta-tab' + (currentTab === 'resend' ? ' active' : '') + ' ta-tab-resend">重发</div>' +
             '<div class="ta-tab' + (currentTab === 'regex' ? ' active' : '') + ' ta-tab-regex">正则</div>' +
             '<div class="ta-tab' + (currentTab === 'log' ? ' active' : '') + ' ta-tab-log">日志' + (bc > 0 ? '<span class="ta-badge">' + bc + '</span>' : '') + '</div></div>';
 
-        var content = currentTab === 'control' ? renderControlTab(s) : currentTab === 'regex' ? renderRegexTab(s) : renderLogTab();
+        var content;
+        switch (currentTab) {
+            case 'home':   content = renderHomeTab(s); break;
+            case 'send':   content = renderSendTab(s); break;
+            case 'tts':    content = renderTTSTab(s); break;
+            case 'filter': content = renderFilterTab(s); break;
+            case 'resend': content = renderResendTab(s); break;
+            case 'regex':  content = renderRegexTab(s); break;
+            default:       content = renderLogTab();
+        }
         $(body).html(tabs + '<div class="ta-tab-content">' + content + '</div>');
         bindPanel();
     }
@@ -805,42 +985,64 @@
         if (!panel) return;
         var body = $(panel).find('#ta-panel-body');
 
-        body.find('.ta-tab-control').click(function() { currentTab = 'control'; refreshPanel(); });
+        // Tab switching
+        body.find('.ta-tab-home').click(function() { currentTab = 'home'; refreshPanel(); });
+        body.find('.ta-tab-send').click(function() { currentTab = 'send'; refreshPanel(); });
+        body.find('.ta-tab-tts').click(function() { currentTab = 'tts'; refreshPanel(); });
+        body.find('.ta-tab-filter').click(function() { currentTab = 'filter'; refreshPanel(); });
+        body.find('.ta-tab-resend').click(function() { currentTab = 'resend'; refreshPanel(); });
         body.find('.ta-tab-regex').click(function() { currentTab = 'regex'; refreshPanel(); });
         body.find('.ta-tab-log').click(function() { currentTab = 'log'; refreshPanel(); });
+
+        // Global (all tabs)
         body.find('.ta-log-copy').click(function() {
             var text = logBuf.map(function(e) { return '[' + e.t + '] [' + e.l + '] ' + e.m; }).join('\n');
             window.parent.navigator.clipboard.writeText(text).then(function() { toastr && toastr.success && toastr.success('已复制到剪贴板', 'TTS自动循环'); });
         });
         body.find('.ta-log-clear').click(function() { logBuf = []; refreshPanel(); });
 
-        if (currentTab === 'regex') {
-            body.find('.ta-rx-toggle').change(function() { settings.regexFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
-            body.find('.ta-rx-sync').click(function() { syncRegexes(); refreshPanel(); });
-            body.on('change', '.ta-rx-item', function() {
-                var id = $(this).attr('data-id');
-                var arr = settings.regexFilter.disabledIds || [];
-                if (this.checked) { arr = arr.filter(function(x) { return x !== id; }); }
-                else { if (arr.indexOf(id) === -1) arr.push(id); }
-                settings.regexFilter.disabledIds = arr;
-                saveSettings();
-            });
-            return;
-        }
+        // Home: save/reset
+        body.find('.ta-save-btn').click(function() { saveSettings(); closePanel(); toastr && toastr.success && toastr.success('设置已保存', 'TTS自动循环'); });
+        body.find('.ta-reset-btn').click(function() { settings = $.extend(true, {}, DEFAULTS); saveSettings(); refreshPanel(); toastr && toastr.info && toastr.info('已重置为默认设置', 'TTS自动循环'); });
 
-        if (currentTab !== 'control') return;
-
+        // Home: start/pause/abort + autoRead + range reading + testTTS
         body.find('.ta-ctl-btn').click(function() { startCycle(); });
         body.find('.ta-pause-btn').click(function() { pauseCycle(); });
         body.find('.ta-abort-btn').click(function() { stopCycle(); });
+        body.find('.ta-ar-toggle').change(function() {
+            if (this.checked) {
+                if (settings.running) { this.checked = false; toastr && toastr.warning && toastr.warning('请先停止循环', 'TTS自动循环'); return; }
+                startAutoRead();
+            } else {
+                stopAutoRead();
+            }
+        });
+        body.find('.ta-rng-read').click(function() {
+            var s = parseInt(body.find('.ta-rng-start').val(), 10) || 1;
+            var e = parseInt(body.find('.ta-rng-end').val(), 10) || -1;
+            readRange(s, e);
+        });
+        body.find('.ta-rng-start, .ta-rng-end').on('input', function() {
+            var s = parseInt(body.find('.ta-rng-start').val(), 10) || 1;
+            var e = parseInt(body.find('.ta-rng-end').val(), 10) || -1;
+            var msgs = getAIMessagesByRange(s, e);
+            body.find('.ta-rng-count').text('共 ' + msgs.length + ' 条AI消息');
+        });
+        body.find('.ta-test-tts-btn').click(function() { testTTS(); });
+
+        // Send tab
         body.find('.ta-as-toggle').change(function() { settings.autoSend.enabled = this.checked; saveSettings(); refreshPanel(); });
         body.find('.ta-as-text').on('input', function() { settings.autoSend.text = this.value.trim() || '继续'; saveSettings(); });
         body.find('.ta-as-mode').change(function() { settings.autoSend.optionMode = this.value; saveSettings(); refreshPanel(); });
         body.find('.ta-as-optidx').on('input', function() { settings.autoSend.optionIndex = Math.max(1, parseInt(this.value, 10) || 1); saveSettings(); });
         body.find('.ta-max-rounds').on('input', function() { settings.autoSend.maxRounds = Math.max(0, parseInt(this.value, 10) || 0); saveSettings(); });
+
+        // TTS tab
         body.find('.ta-tts-toggle').change(function() { settings.tts.enabled = this.checked; saveSettings(); refreshPanel(); });
         body.find('.ta-tts-voice').change(function() { settings.tts.voice = this.value; saveSettings(); });
         body.find('.ta-tts-rate').on('input', function() { settings.tts.rate = parseInt(this.value, 10); body.find('.ta-rate-val').text(this.value + '%'); saveSettings(); });
+
+        // Filter tab
         body.find('.ta-f-toggle').change(function() { settings.textFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
         body.find('.ta-read-on').change(function() { settings.textFilter.readEnabled = this.checked; saveSettings(); });
         body.find('.ta-skip-on').change(function() { settings.textFilter.skipEnabled = this.checked; saveSettings(); });
@@ -848,16 +1050,26 @@
         body.find('.ta-add-skip').click(function() { if (!Array.isArray(settings.textFilter.skipRanges)) settings.textFilter.skipRanges = []; settings.textFilter.skipRanges.push({ start: '', end: '' }); saveSettings(); refreshPanel(); });
         body.on('click', '.ta-rm-range', function() { var row = $(this).closest('.ta-range-row'); var idx = parseInt(row.attr('data-idx'), 10); var t = row.attr('data-type'); var arr = t === 'read' ? settings.textFilter.readRanges : settings.textFilter.skipRanges; if (arr) arr.splice(idx, 1); saveSettings(); refreshPanel(); });
         body.on('input', '.ta-range-start, .ta-range-end', function() { var row = $(this).closest('.ta-range-row'); var idx = parseInt(row.attr('data-idx'), 10); var t = row.attr('data-type'); var arr = t === 'read' ? settings.textFilter.readRanges : settings.textFilter.skipRanges; if (arr && arr[idx]) { arr[idx].start = row.find('.ta-range-start').val() || ''; arr[idx].end = row.find('.ta-range-end').val() || ''; saveSettings(); } });
+
+        // Resend tab
         body.find('.ta-rs-toggle').change(function() { settings.textResend.enabled = this.checked; saveSettings(); refreshPanel(); });
         body.find('.ta-add-tag').click(function() { var v = body.find('.ta-rs-tag-input').val().trim(); if (!v) return; if (!Array.isArray(settings.textResend.requiredTags)) settings.textResend.requiredTags = []; if (!settings.textResend.requiredTags.includes(v)) { settings.textResend.requiredTags.push(v); saveSettings(); refreshPanel(); } body.find('.ta-rs-tag-input').val(''); });
         body.on('click', '.ta-tag-rm', function() { var idx = parseInt($(this).attr('data-idx'), 10); if (!isNaN(idx) && Array.isArray(settings.textResend.requiredTags)) { settings.textResend.requiredTags.splice(idx, 1); saveSettings(); refreshPanel(); } });
         body.find('.ta-rs-retries').on('input', function() { settings.textResend.maxRetries = Math.max(1, parseInt(this.value, 10) || 3); saveSettings(); });
         body.find('.ta-rs-delay').on('input', function() { settings.textResend.retryDelay = Math.max(0, parseInt(this.value, 10) || 500); saveSettings(); });
-        body.find('.ta-save-btn').click(function() { saveSettings(); closePanel(); toastr && toastr.success && toastr.success('设置已保存', 'TTS自动循环'); });
-        body.find('.ta-reset-btn').click(function() { settings = $.extend(true, {}, DEFAULTS); saveSettings(); refreshPanel(); toastr && toastr.info && toastr.info('已重置为默认设置', 'TTS自动循环'); });
-        body.find('.ta-test-tts-btn').click(function() { testTTS(); });
-    }
 
+        // Regex tab
+        body.find('.ta-rx-toggle').change(function() { settings.regexFilter.enabled = this.checked; saveSettings(); refreshPanel(); });
+        body.find('.ta-rx-sync').click(function() { syncRegexes(); refreshPanel(); });
+        body.on('change', '.ta-rx-item', function() {
+            var id = $(this).attr('data-id');
+            var arr = settings.regexFilter.disabledIds || [];
+            if (this.checked) { arr = arr.filter(function(x) { return x !== id; }); }
+            else { if (arr.indexOf(id) === -1) arr.push(id); }
+            settings.regexFilter.disabledIds = arr;
+            saveSettings();
+        });
+    }
     // ============ 键盘 ============
     $(PD()).on('keydown.ta', function(e) { if (e.key === 'Escape' && panelOpen) closePanel(); });
 
@@ -874,6 +1086,7 @@
         createPanel();
         player = new AudioQ(onPlayerStart);
         window.eventOn(window.tavern_events.MESSAGE_RECEIVED, onMsgReceived);
+        syncRegexes();
         addLog('info', '初始化完毕');
     }
 
@@ -883,7 +1096,11 @@
         window._ta_registered = true;
         initOnce();
         eventOn(getButtonEvent(BTN_NAME), function() { if (!panelOpen) openPanel(); });
-        eventOn(getButtonEvent(BTN_READ), function() { toastr && toastr.info && toastr.info('正在朗读最新消息...', 'TTS自动循环'); testTTS(); });
+        eventOn(getButtonEvent(BTN_READ), function() {
+            if (settings.autoRead) { stopAutoRead(); }
+            else if (settings.running) { toastr && toastr.warning && toastr.warning('请先停止循环', 'TTS自动循环'); }
+            else { startAutoRead(); }
+        });
     }
 
     register();

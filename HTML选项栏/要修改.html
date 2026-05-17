@@ -1,0 +1,401 @@
+```html
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>快速回复选项</title>
+    <style>
+      :root {
+        --bg-card: rgba(250, 246, 241, 0.97);
+        --bg-block: rgba(255, 255, 255, 0.6);
+        --border: rgba(120, 80, 60, 0.12);
+        --border-s: rgba(120, 80, 60, 0.2);
+        --text: #2a1f1a;
+        --text-sub: #7a6055;
+        --text-dim: #b0998e;
+        --ink: #c0392b;
+        --ink-soft: rgba(192, 57, 43, 0.1);
+        --shadow: 0 4px 24px rgba(80, 40, 20, 0.1);
+      }
+      [data-theme="dark"] {
+        --bg-card: rgba(30, 24, 22, 0.96);
+        --bg-block: rgba(43, 34, 30, 0.68);
+        --border: rgba(186, 137, 105, 0.12);
+        --border-s: rgba(186, 137, 105, 0.24);
+        --text: #d8cbc1;
+        --text-sub: #b18d77;
+        --text-dim: #876b5d;
+        --ink: #c98e6f;
+        --ink-soft: rgba(201, 142, 111, 0.12);
+        --shadow: 0 18px 44px rgba(0, 0, 0, 0.32);
+      }
+
+      *,
+      *::before,
+      *::after {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family:
+          -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", sans-serif;
+        background: transparent;
+        color: var(--text);
+        padding: 10px;
+        -webkit-font-smoothing: antialiased;
+        transition: color 0.5s ease;
+      }
+
+      .card {
+        max-width: 520px;
+        margin: 0 auto;
+        background: var(--bg-card);
+        border-radius: 14px;
+        border: 1px solid var(--border-s);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        position: relative;
+        transition:
+          background 0.5s ease,
+          border-color 0.5s ease,
+          box-shadow 0.5s ease;
+        animation: card-in 0.55s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      .card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: radial-gradient(
+          ellipse at 80% 0%,
+          rgba(192, 57, 43, 0.04) 0%,
+          transparent 60%
+        );
+        pointer-events: none;
+        border-radius: inherit;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 13px 18px;
+        border-bottom: 1px solid var(--border);
+        background: linear-gradient(
+          180deg,
+          var(--bg-block) 0%,
+          transparent 100%
+        );
+        user-select: none;
+        transition:
+          background 0.5s ease,
+          border-color 0.5s ease;
+      }
+      .toolbar-left {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .toolbar-right {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .title {
+        font-size: 1.08rem;
+        font-weight: 650;
+        color: var(--text);
+        letter-spacing: 0.08em;
+        transition: color 0.5s ease;
+      }
+
+      .mode-badge {
+        font-size: 0.72rem;
+        font-weight: 550;
+        padding: 3px 10px;
+        border-radius: 999px;
+        letter-spacing: 0.06em;
+        border: 1px solid var(--border);
+        color: var(--text-sub);
+        background: var(--bg-block);
+        cursor: pointer;
+        transition:
+          background 0.5s ease,
+          border-color 0.5s ease,
+          color 0.2s;
+        &:hover {
+          color: var(--ink);
+          border-color: var(--ink);
+        }
+      }
+
+      .icon-btn {
+        width: 30px;
+        height: 30px;
+        border: none;
+        background: transparent;
+        border-radius: 7px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--text-sub);
+        transition:
+          background 0.2s,
+          color 0.2s;
+        svg {
+          width: 15px;
+          height: 15px;
+        }
+        &:hover {
+          background: var(--ink-soft);
+          color: var(--ink);
+        }
+        &:active {
+          transform: scale(0.88);
+        }
+      }
+
+      .grid-wrap {
+      }
+
+      .options-grid {
+        padding: 15px 16px 16px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+      }
+      @media (max-width: 360px) {
+        .options-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .option-item {
+        background: var(--bg-block);
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        padding: 12px 14px;
+        cursor: pointer;
+        font-size: 0.96rem;
+        color: var(--text);
+        text-align: center;
+        white-space: pre-wrap;
+        word-break: break-word;
+        line-height: 1.58;
+        transition:
+          background 0.2s,
+          border-color 0.2s,
+          transform 0.2s,
+          color 0.5s;
+        opacity: 0;
+        animation: item-up 0.4s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+        &:hover {
+          background: var(--bg-card);
+          border-color: var(--ink);
+          transform: translateY(-2px);
+        }
+        &:active {
+          transform: scale(0.97);
+        }
+      }
+
+      .error {
+        font-size: 0.9rem;
+        color: var(--ink);
+        background: var(--ink-soft);
+        border: 1px solid rgba(192, 57, 43, 0.2);
+        border-radius: 8px;
+        padding: 13px 15px;
+        margin: 14px 16px;
+      }
+
+      @keyframes card-in {
+        from {
+          opacity: 0;
+          transform: translateY(10px) scale(0.99);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0) scale(1);
+        }
+      }
+      @keyframes item-up {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      @media (max-width: 480px) {
+        body {
+          padding: 8px;
+        }
+        .card {
+          border-radius: 12px;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          animation-duration: 1ms !important;
+          transition-duration: 1ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card" id="card">
+      <div class="toolbar" id="toolbar">
+        <div class="toolbar-left">
+          <span class="title">快速回复</span>
+          <button
+            class="mode-badge"
+            id="mode-badge"
+            onclick="toggleMode(event)"
+          >
+            直接发送
+          </button>
+        </div>
+        <div class="toolbar-right">
+          <button
+            class="icon-btn"
+            onclick="toggleTheme(event)"
+            title="切换主题"
+            id="btn-theme"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+            </svg>
+          </button>
+        </div>
+      </div>
+      <div class="grid-wrap" id="grid-wrap">
+        <div class="options-grid" id="options-grid"></div>
+      </div>
+    </div>
+
+    <script>
+      const THEME_KEY = "qsh2-theme";
+      const MODE_NAMES = {
+        send: "直接发送",
+        setinput: "仅输入",
+        append: "追加输入",
+      };
+      const MODES = ["send", "setinput", "append"];
+      let currentMode = "send";
+
+      // ── 主题 ──
+      function applyTheme(theme) {
+        document.documentElement.setAttribute("data-theme", theme);
+        const btn = document.getElementById("btn-theme");
+        btn.innerHTML =
+          theme === "dark"
+            ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>'
+            : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+      }
+
+      function toggleTheme(e) {
+        e.stopPropagation();
+        const next =
+          document.documentElement.getAttribute("data-theme") === "dark"
+            ? "light"
+            : "dark";
+        try {
+          localStorage.setItem(THEME_KEY, next);
+        } catch {}
+        applyTheme(next);
+      }
+
+      // 监听状态栏主题变化
+      window.addEventListener("storage", (e) => {
+        if (e.key === THEME_KEY) applyTheme(e.newValue || "light");
+      });
+
+      // ── 模式 ──
+      function toggleMode(e) {
+        e.stopPropagation();
+        const idx = (MODES.indexOf(currentMode) + 1) % MODES.length;
+        currentMode = MODES[idx];
+        try {
+          localStorage.setItem("qsh2-mode", currentMode);
+        } catch {}
+        document.getElementById("mode-badge").textContent =
+          MODE_NAMES[currentMode];
+      }
+
+      // ── 发送 ──
+      document.getElementById("options-grid").addEventListener("click", (e) => {
+        const item = e.target.closest(".option-item");
+        if (!item) return;
+        const text = item.textContent.trim();
+        if (!text || ["…", "..."].includes(text)) return;
+
+        if (typeof triggerSlash === "function") {
+          if (currentMode === "send") triggerSlash(`/send ${text}|/trigger`);
+          else if (currentMode === "setinput")
+            triggerSlash(`/setinput ${text}`);
+          else {
+            const cur = window.parent.$?.("#send_textarea").val() || "";
+            triggerSlash(`/setinput ${cur ? cur + "\n" + text : text}`);
+          }
+        }
+
+        // 自动收缩的代码已经去掉了，现在点击后面板会一直保持展开状态
+      });
+
+      // ── 初始化 ──
+      setTimeout(() => {
+        try {
+          const theme = localStorage.getItem(THEME_KEY) || "light";
+          applyTheme(theme);
+          const savedMode = localStorage.getItem("qsh2-mode") || "send";
+          currentMode = savedMode;
+          document.getElementById("mode-badge").textContent =
+            MODE_NAMES[currentMode];
+        } catch {}
+
+        try {
+          const msg = getChatMessages(getCurrentMessageId())[0];
+          const match = msg.message.match(
+            /<options>((?:(?!<options>).)*?)<\/options>/s,
+          );
+          const opts = (match ? match[1] : "")
+            .split("|")
+            .map((s) => s.trim())
+            .filter(Boolean);
+          const grid = document.getElementById("options-grid");
+          opts.forEach((opt, i) => {
+            const el = document.createElement("div");
+            el.className = "option-item";
+            el.textContent = opt;
+            el.style.animationDelay = `${i * 0.05}s`;
+            if (opt.length > 20) el.style.fontSize = "0.9rem";
+            grid.appendChild(el);
+          });
+          // 单个选项占满整行
+          if (opts.length % 2 !== 0)
+            grid.lastElementChild.style.gridColumn = "1 / -1";
+        } catch (err) {
+          document.getElementById("options-grid").innerHTML =
+            `<div class="error">加载失败: ${err.message}</div>`;
+        }
+      }, 0);
+    </script>
+  </body>
+</html>
+```
