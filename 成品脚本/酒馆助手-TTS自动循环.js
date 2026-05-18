@@ -326,8 +326,8 @@
             if (!settings.running) { addLog('warn', '重发被停止中断'); isResending = false; return { ok: false, text: cur }; }
             isResending = true;
             try {
-                await window.TavernHelper.triggerSlash('/del 1');
                 await dly(delMs);
+                await window.TavernHelper.triggerSlash('/del 1');
                 await window.TavernHelper.triggerSlash('/trigger');
                 var nt = '', nid = null;
                 for (var p = 0; p < 60; p++) {
